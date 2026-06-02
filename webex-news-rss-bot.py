@@ -189,7 +189,7 @@ def _expand_keyword_env(value: str) -> str | None:
     - 未定義または空文字なら警告を出して None を返す（呼び出し側でスキップ）。
     - ${VAR} を含まない通常キーワードはそのまま返す。
 
-    例: "!${MYFAB_KEYWORD}" + MYFAB_KEYWORD="fujitsu"  → "!fujitsu"
+    例: "!${MYFAB_KEYWORD}" + MYFAB_KEYWORD="abc"  → "!abc"
 
     用途: 公開リポジトリの categories.yml にプロプライエタリな会社名・ブランド名を
     直接書きたくない場合、placeholder を .env で実値に解決できる。
@@ -301,7 +301,7 @@ def load_bots(path: str = BOTS_FILE) -> list[dict]:
         # 環境変数の展開と必須フィールドの検証 / Expand env vars and validate required fields
         for i, ch in enumerate(channels):
             # チャンネル表示名 (name) も ${VAR} を展開する
-            # 例: "${MYFAB_KEYWORD}ニュース" + MYFAB_KEYWORD=Fujitsu → "Fujitsuニュース"
+            # 例: "${MYFAB_KEYWORD}ニュース" + MYFAB_KEYWORD=abc → "abcニュース"
             # 用途: 公開リポジトリにチャンネル名（=会社名）を露出させない
             if "name" in ch and isinstance(ch["name"], str) and '$' in ch["name"]:
                 resolved_name = os.path.expandvars(ch["name"])

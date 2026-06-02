@@ -216,8 +216,9 @@ channels:
     - AI・機械学習
 ```
 
-### 2. キーワード設定 (`categories.yml`)
-記事のタイトル・概要・タグ・**URL（リンク）** からカテゴリを判定するためのキーワードを定義します。
+### 2. キーワード設定 (`categories.yml`) / Category keywords
+記事のタイトル・概要・タグ・**URL（リンク）** からカテゴリを判定するためのキーワードを定義します。  
+Defines keywords used to classify articles by their title, summary, tags and **URL (link)**.
 
 ```yaml
 AI・機械学習:
@@ -246,7 +247,8 @@ This `!` marker designates a keyword as a *must-match*: at least one such keywor
 
 #### スコアリングアルゴリズム / Scoring algorithm
 
-記事が以下のすべてを満たすとそのカテゴリに **合格** し、配信対象になります。
+記事が以下のすべてを満たすとそのカテゴリに **合格** し、配信対象になります。  
+An article **passes** a category (and is delivered) when **all** of the following conditions are met:
 
 | 観点 | 内容 |
 |:---|:---|
@@ -256,7 +258,7 @@ This `!` marker designates a keyword as a *must-match*: at least one such keywor
 | **スコア計算** | `score = (必須語マッチ数 × 3) + (通常語マッチ数 × 1)` |
 | **合格ライン** | `score >= 4`（デフォルト、`webex-news-rss-bot.py` の `min_score` で変更可） |
 
-合格・不合格の具体例：
+合格・不合格の具体例 / Pass / fail examples:
 
 | 構成 | スコア | 合否 | 補足 |
 |:---|:---:|:---:|:---|
@@ -273,14 +275,19 @@ This `!` marker designates a keyword as a *must-match*: at least one such keywor
 
 #### キーワード設計のコツ / Tuning tips
 
-- **必須語は誤マッチしにくいCisco固有のブランド・製品名に限定**: 単独の `!nexus`, `!duo`, `!umbrella` 等は英語の一般語(`Belarus-nexus`等)に誤マッチするため、`!cisco nexus`, `!nexus 9000`, `!cisco duo`, `!duo security` のような **compound (複合語) 必須語**を採用しています。
-- **複数形のバリアントも忘れずに**: `!vulnerability` だけだと "vulnerabilities" (複数形) にマッチしません。`!vulnerabilities`, `!exploits`, `!breaches` などの複数形も別途登録するか、語幹 `!vulnerabilit` のような部分一致語を併用してください。
-- **広いカテゴリ（一般・経済等）には `!` 付き語を多めに設定** すると、雑多なRSSからのノイズを排除しやすくなります。
-- **`min_score` を変更したい場合** は [webex-news-rss-bot.py](webex-news-rss-bot.py) の `filter_by_category(..., min_score=4)` のデフォルト値を調整します。値を下げると緩く、上げると厳しくなります。
+- **必須語は誤マッチしにくいブランド・製品名に限定**: 単独の `!nexus`, `!duo`, `!umbrella` 等は英語の一般語(`Belarus-nexus`等)に誤マッチするため、`!cisco nexus`, `!nexus 9000`, `!cisco duo`, `!duo security` のような **compound (複合語) 必須語**を採用しています。  
+  **Keep must-keywords highly specific to brand/product names.** Single words like `!nexus`, `!duo`, `!umbrella` collide with English words (e.g. "Belarus-nexus"). Prefer compounds such as `!cisco nexus`, `!cisco duo`, `!duo security`.
+- **複数形のバリアントも忘れずに**: `!vulnerability` だけだと "vulnerabilities" (複数形) にマッチしません。`!vulnerabilities`, `!exploits`, `!breaches` などの複数形も別途登録するか、語幹 `!vulnerabilit` のような部分一致語を併用してください。  
+  **Don't forget plural variants.** `!vulnerability` does not match "vulnerabilities". Register plurals such as `!vulnerabilities`, `!exploits`, `!breaches`, or use a stem like `!vulnerabilit`.
+- **広いカテゴリ（一般・経済等）には `!` 付き語を多めに設定** すると、雑多なRSSからのノイズを排除しやすくなります。  
+  Broad categories (general news, economy, etc.) benefit from many `!` must-keywords to suppress noise.
+- **`min_score` を変更したい場合** は [webex-news-rss-bot.py](webex-news-rss-bot.py) の `filter_by_category(..., min_score=4)` のデフォルト値を調整します。値を下げると緩く、上げると厳しくなります。  
+  To change `min_score`, edit the default in `filter_by_category(..., min_score=4)`. Lower = lax, higher = strict.
 
 #### カテゴリの現状サマリ / Current category sizes
 
-本リポジトリの `categories.yml` の規模（参考値）：
+本リポジトリの `categories.yml` の規模（参考値）：  
+Approximate size of each category in this repository's `categories.yml`:
 
 | カテゴリ | 必須語(`!`) | 通常語 | 主な用途 |
 |:---|---:|---:|:---|
@@ -292,16 +299,18 @@ This `!` marker designates a keyword as a *must-match*: at least one such keywor
 | クラウド | 19 | 73 | AWS/Azure/GCP/Kubernetes/データセンター |
 | Cisco | 42 | 108 | Cisco固有ブランド + compound必須語 |
 
-### 3. RSSフィード設定 (`urls.yml`)
-ニュースの収集元となるRSSフィードURLの一覧を管理します。
+### 3. RSSフィード設定 (`urls.yml`) / RSS feed list
+ニュースの収集元となるRSSフィードURLの一覧を管理します。  
+Lists the RSS feed URLs to collect articles from.
 ```yaml
 - https://blogs.cisco.com/feed
 - https://zenn.dev/topics/aiagent/feed
 - https://b.hatena.ne.jp/search/tag?q=AI&mode=rss
 ```
 
-### 4. 朝メッセージ署名設定 (`morning_messages.txt`)
-配信メッセージの末尾にランダムで追加される署名フレーズを1行ずつ記述して管理します。
+### 4. 朝メッセージ署名設定 (`morning_messages.txt`) / Morning footer phrases
+配信メッセージの末尾にランダムで追加される署名フレーズを1行ずつ記述して管理します。  
+List of footer phrases (one per line) randomly appended to the end of each delivered Webex message.
 ```text
 Your daily news briefing, delivered around X AM sharp. 毎朝X時頃、デイリーニュースブリーフィングをお届けします。
 Stay ahead of the curve: Your daily digest arrives around X AM. 常に先を行くために。毎朝X時頃に最新情報を配信します。
@@ -311,10 +320,12 @@ Stay ahead of the curve: Your daily digest arrives around X AM. 常に先を行�
 
 ## Claudeによる自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode
 
-本スクリプトは、**Claude API** を用いて収集したニュースの概要を自然な日本語1〜2文（110字以内）に自動要約します。英文RSSは自動で日本語に翻訳されます。APIの課金を抑えるため、以下の**「超エコノミーモード（超節約設計）」**が自動適用されます。
+本スクリプトは、**Claude API** を用いて収集したニュースの概要を自然な日本語1〜2文（110字以内）に自動要約します。英文RSSは自動で日本語に翻訳されます。APIの課金を抑えるため、以下の**「超エコノミーモード（超節約設計）」**が自動適用されます。  
+This script uses the **Claude API** to summarize each article into 1–2 natural Japanese sentences (≤110 chars). English RSS is auto-translated to Japanese. The following **eco-mode** optimizations are applied automatically to minimize API spend:
 
-### 1. プロンプト極小化（約22トークン）
-指示プロンプトを以下の最短形に圧縮し、入力トークンを約89%削減：
+### 1. プロンプト極小化（約22トークン）/ Minimal prompt (~22 tokens)
+指示プロンプトを以下の最短形に圧縮し、入力トークンを約89%削減：  
+The instruction prompt is compressed to the shortest practical form, cutting input tokens by ~89%:
 ```
 日本語110字以内1〜2文で要約のみ出力。
 ラベル/前置き/改行/情報不足要求は禁止。
@@ -322,29 +333,34 @@ Stay ahead of the curve: Your daily digest arrives around X AM. 常に先を行�
 T: {title}
 S: {summary}
 ```
-これにより `タイトル：`/`概要：` のような不要ラベルや「本文を提供してください」のような追加情報要求も発生しません。
+これにより `タイトル：`/`概要：` のような不要ラベルや「本文を提供してください」のような追加情報要求も発生しません。  
+This prevents unwanted labels (`タイトル：`/`概要：`) or info-request replies ("please provide the article body").
 
-### 2. SKIP-API（自動要約スキップ・API課金ゼロ）
-元のRSSから取得した概要が、以下の **すべて** を満たす場合はClaudeを呼ばずそのまま採用：
-- 文字数が **100文字以下**
-- 末尾が「...」「…」「続きを読む」「more」で途切れていない
-- HTMLエンティティ（`&nbsp;`, `&gt;` 等）を含まないクリーンな文章
-- **日本語（ひらがな・カタカナ・漢字）を1文字以上含む**
+### 2. SKIP-API（自動要約スキップ・API課金ゼロ）/ Skip Claude when not needed (zero API cost)
+元のRSSから取得した概要が、以下の **すべて** を満たす場合はClaudeを呼ばずそのまま採用：  
+If the original RSS summary satisfies **all** of the following, Claude is not called and the original text is used as-is:
+- 文字数が **100文字以下** / Length ≤ **100 characters**
+- 末尾が「...」「…」「続きを読む」「more」で途切れていない / Not truncated by `...` / `…` / `続きを読む` / `more`
+- HTMLエンティティ（`&nbsp;`, `&gt;` 等）を含まないクリーンな文章 / Clean text without HTML entities (`&nbsp;`, `&gt;`, etc.)
+- **日本語（ひらがな・カタカナ・漢字）を1文字以上含む** / Contains at least one Japanese character (hiragana/katakana/kanji)
 
-### 3. 英文の自動翻訳
+### 3. 英文の自動翻訳 / Auto-translate English to Japanese
 SKIP-API条件のうち「日本語含有」を満たさない記事（=純英文）は、たとえ短くても **必ずClaudeで日本語翻訳＋要約** します。  
-→ 例: `"SpaceX Falcon 9 launches Starlink mission from Florida"` → `"SpaceXのファルコン9ロケットがフロリダからStarlink衛星打ち上げミッションを実施した。"`
+Pure English articles (no Japanese chars) are **always** sent to Claude, even when short, to be translated and summarized.  
+→ 例 / Example: `"SpaceX Falcon 9 launches Starlink mission from Florida"` → `"SpaceXのファルコン9ロケットがフロリダからStarlink衛星打ち上げミッションを実施した。"`
 
-### 4. 要約キャッシュ
-複数チャンネルに同一URL記事が出現した場合、初回の要約結果をメモリにキャッシュして2回目以降は再利用（API再呼び出しを完全に回避）。
+### 4. 要約キャッシュ / In-memory summary cache
+複数チャンネルに同一URL記事が出現した場合、初回の要約結果をメモリにキャッシュして2回目以降は再利用（API再呼び出しを完全に回避）。  
+When the same article URL appears in multiple channels, the first summary is cached in memory and reused (no re-call to the API).
 
-### 5. 最大出力制限
-Claudeからの返答を **`max_tokens = 140`** に強制制限し、出力の膨張を防止。
+### 5. 最大出力制限 / Hard output cap
+Claudeからの返答を **`max_tokens = 140`** に強制制限し、出力の膨張を防止。  
+Claude responses are hard-capped at **`max_tokens = 140`** to prevent runaway output.
 
-### コスト削減効果（参考）
-1日200記事に要約をかける場合：
-- **旧プロンプト**: ~200トークン × 200記事 = 40,000入力トークン/日
-- **新プロンプト**: ~22トークン × 200記事 = **4,400入力トークン/日（約89%削減）**
+### コスト削減効果（参考）/ Cost saving (rough estimate)
+1日200記事に要約をかける場合：For 200 article summaries per day:
+- **旧プロンプト / Old prompt**: ~200 tokens × 200 articles = 40,000 input tokens / day
+- **新プロンプト / New prompt**: ~22 tokens × 200 articles = **4,400 input tokens / day (~89% reduction)**
 
 ---
 
@@ -540,4 +556,4 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 ---
 
 *Developed with ❤️ for webex-news-rss-bot*
-# webex-news-rss-bot
+# webex-news-rss-bot# webex-news-rss-bot

@@ -9,9 +9,10 @@
 !requirements.txt
 !categories.yml
 !bots.yml.example
+!urls.yml.example
 
 # Never track secrets or personal configs / シークレット情報等は絶対に追跡しない
 .env
-bots.yml
 webex-new-rss-bot.plist
 categories-private.yml
+urls.yml
