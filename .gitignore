@@ -1,0 +1,17 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+*
+
+# But track these project files / 以下のファイルは追跡する
+!.gitignore
+!.env.example
+!webex-news-rss-bot.py
+!README.md
+!requirements.txt
+!categories.yml
+!bots.yml.example
+
+# Never track secrets or personal configs / シークレット情報等は絶対に追跡しない
+.env
+bots.yml
+webex-new-rss-bot.plist
+categories-private.yml

@@ -1,0 +1,32 @@
+# ============================================================
+# bots.yml.example  —  マルチチャンネル（Bot）設定テンプレート
+#
+# このファイルで「どのWebexスペースに・どのカテゴリを送るか」を定義します。
+# Define which Webex space receives which news categories.
+#
+# 使い方 / Usage:
+# 1. このファイルをコピーして `bots.yml` を作成する / Copy to `bots.yml`
+# 2. `bots.yml` を編集してWebexスペースIDとカテゴリを設定する
+# ============================================================
+
+channels:
+  # チャンネル 1: AIニュース専用スペース
+  - name: AI・機械学習ニュース
+    # .env ファイルの環境変数を読み込む場合は ${変数名} と記述します
+    webex_space_id: ${WEBEX_SPACE_ID_AI}
+    # webex_bot_token: "${WEBEX_BOT_TOKEN_AI}" # 省略時はデフォルトの.envトークンを使用
+    categories:
+      - AI・機械学習
+
+  # チャンネル 2: セキュリティ＆ネットワーク関連
+  - name: セキュリティ & ネットワークニュース
+    webex_space_id: your_security_space_id_here
+    categories:
+      - セキュリティ
+      - ネットワーク
+      - Cisco
+
+  # チャンネル 3: すべてのカテゴリを配信するダイジェスト
+  # - name: 全カテゴリダイジェスト
+  #   webex_space_id: ${WEBEX_SPACE_ID_DIGEST}
+  #   categories: []   # 空 = 全カテゴリ

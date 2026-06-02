@@ -1,0 +1,5 @@
+feedparser==6.0.12
+requests==2.32.5
+python-dotenv==1.0.1
+PyYAML==6.0.2
+webex_bot>=1.2.8

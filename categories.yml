@@ -1,0 +1,660 @@
+# ============================================================
+# categories.yml
+#
+# カテゴリキーワード設定ファイル / Category keyword configuration
+#
+# - キーがカテゴリ名（--category オプションで指定する名前）
+# - 値がそのカテゴリにマッチするキーワードのリスト
+# - 大文字・小文字は区別しません（case-insensitive）
+#
+# - Keys are category names (used with the --category option)
+# - Values are keyword lists matched against article title/summary/tags
+# - Matching is case-insensitive
+# ============================================================
+一般:
+  # ── 必須語（!付き）＝「重大な出来事の型」
+  # これが1つも無ければ、ただの話題記事として除外
+  # 災害・気象
+  - "!地震"
+  - "!津波"
+  - "!噴火"
+  - "!台風"
+  - "!豪雨"
+  - "!大雪"
+  - "!特別警報"
+  - "!注意報"
+  - "!避難"
+  - "!災害"
+  - "!火事"
+  # 事件・事故・司法
+  - "!逮捕"
+  - "!起訴"
+  - "!容疑"
+  - "!事故"
+  - "!死亡"
+  - "!死者"
+  - "!殺人"
+  - "!訴訟"
+  - "!判決"
+  - "!有罪"
+  - "!無罪"
+  - "!摘発"
+  # 政治の重大イベント
+  - "!解散"
+  - "!辞任"
+  - "!可決"
+  - "!成立"     # 法案成立
+  - "!選挙"
+  # ── 通常語（補強：分野・状況）
+  # 災害補強
+  - 火災
+  - 大雨
+  - 暴風
+  - 警報
+  - 行方不明
+  - 救助
+  - けが
+  - 負傷
+  - 被害
+  - 気象
+  # 事件・司法補強
+  - 事件
+  - 贈収賄
+  - 詐欺
+  - 不正
+  - 押収
+  - 書類送検
+  # 政治補強
+  - "!首相"
+  - "!内閣"
+  - "!国会"
+  - "!法案"
+  - "!閣議"
+  - 与党
+  - 野党
+  - 天皇
+  - 皇室
+  - 戦争
+  - 戦闘
+  - war
+  - 党首
+  # ── トレンド語（※定期的に見直す前提。今ホットな固有名詞）
+  # ↓ ここは "陳腐化する" 前提でコメント明記しておくと運用が楽
+  - 高市          # 現首相（2026年時点）
+  - "!トランプ"
+  - "!trump"
+  - 中東
+  - イラン
+  - イスラエル
+  - ウクライナ
+  - ロシア
+  - 台湾
+
+経済:
+  # ── 必須語（!付き）＝「経済を動かす出来事の型」
+  - "!値上げ"
+  - "!値下げ"
+  - "!利上げ"
+  - "!利下げ"
+  - "!インフレ"
+  - "!デフレ"
+  - "!賃上げ"
+  - "!決算"
+  - "!最高益"
+  - "!買収"
+  - "!m&a"
+  - "!関税"
+  - "!増税"
+  - "!減税"
+  - "!上場"
+  - "!倒産"
+  - "!赤字"
+  # ── 必須語（経済固有の指標・市場語、誤マッチ少なく単独昇格しても安全）
+  - "!株価"
+  - "!日経平均"
+  - "!nasdaq"
+  - "!為替"
+  - "!円安"
+  - "!円高"
+  - "!金利"
+  - "!景気"
+  - "!gdp"
+  - "!営業利益"
+  - "!経常利益"
+  - "!業績"
+  - "!補助金"
+  - "!ipo"
+  # ── 通常語（! 無し）：補強・状況
+  - 提携
+  - 出資
+  - 投資             # 「研究投資」「人的投資」など他カテゴリと被るため必須語化しない
+  - 物価
+  - 相場
+  - 日銀
+  - ナスダック
+  - 年度
+  - 世界銀行
+  - 売上
+  - 法案
+  - 規制
+  - 給付
+  - 経済
+  - 政府
+  - 閣議
+  - 首脳
+  - 会談
+  # ── トレンド語（※定期見直し前提）
+  - 半導体
+  - サプライチェーン
+  - エネルギー
+  - 原油
+  - コメ
+  - 宇宙
+  - space
+  - スペース
+
+
+AI・機械学習:
+  # ── 必須語（! 付き）：AI・機械学習記事の核となる語
+  - "!ai"
+  - "!artificial intelligence"
+  - "!machine learning"
+  - "!機械学習"
+  - "!深層学習"
+  - "!生成ai"
+  - "!generative ai"
+  - "!llm"
+  - "!大規模言語モデル"
+  - "!agentic"
+  - "!aiエージェント"
+  - "!chatgpt"
+  - "!gpt"
+  - "!openai"
+  - "!anthropic"
+  - "!claude"
+  - "!gemini"
+  - "!mythos"
+  - "!agentic ai"
+  - "!ai agent"
+  - "!aiエージェント"
+  - "!openclaw"
+   # ── 通常語（補強用）
+  - ml
+  - copilot
+  - perplexity
+  - hugging face
+  - エージェント
+  - transformer
+  - fine-tuning
+  - ファインチューニング
+  - rag
+  - retrieval augmented
+  - vector
+  - ベクトル
+  - embedding
+  - 埋め込み
+  - 推論
+  - inference
+  - プロンプト
+  - prompt
+  - マルチモーダル
+  - multimodal
+  - 基盤モデル
+  - foundation model
+  # 注意: mythos, antigravity は誤ヒットが多いので用途確認推奨
+
+セキュリティ:
+  # ── 必須語（! 付き）：セキュリティ専門ニュース判定の核となる語
+  - "!security"
+  - "!セキュリティ"
+  - "!vulnerability"
+  - "!vulnerabilities"   # 複数形（defers_to が機能するための重要追加）
+  - "!脆弱性"
+  - "!cve"
+  - "!malware"
+  - "!マルウェア"
+  - "!ransomware"
+  - "!ランサムウェア"
+  - "!サイバー攻撃"
+  - "!cyberattack"
+  - "!cyberattacks"
+  - "!サイバーセキュリティ"
+  - "!漏洩"
+  - "!情報流出"
+  - "!不正アクセス"
+  - "!phishing"
+  - "!フィッシング"
+  - "!exploit"
+  - "!exploits"
+  - "!exploited"
+  - "!breach"
+  - "!breaches"
+  - "!cyber attack"      # スペース区切り版
+  - "!cyber attacks"
+  # ── 通常語：補強・分野
+  - インシデント
+  - threat
+  - threats
+  - 脅威
+  - patch
+  - パッチ
+  - advisory
+  - breach
+  - zero-day
+  - ゼロデイ
+  - apt
+  - ddos
+  - 標的型
+  - スパム
+  - ボット
+  - c2
+  - ioc
+  - siem
+  - xdr
+  - edr
+  - soc
+  - cisa
+  - jpcert
+  - ipa
+  - nist
+  - agentic ai
+  - ai agent
+  - aiエージェント
+  # ── 通常語：手口・サプライチェーン関連（score=3記事の救済用）
+  - github
+  - パッケージ
+  - サプライチェーン
+  - supply chain
+  - takedown
+  - 摘発
+  - 押収
+  - compromised
+  - 改ざん
+  - 詐欺
+  - scam
+  - スキャン
+  - 不正
+  - hack
+  - hacker
+  - ハッカー
+  - leak
+  - データ侵害
+  # ── 通常語：主要ベンダー
+  - cisco
+  - juniper
+  - arista
+  - aruba
+  - hpe
+  - extreme
+  - nokia
+  - palo alto
+  - fortinet
+  - zscaler
+  - netskope
+  - versa
+  - cloudflare
+  - broadcom
+  - crowdstrike
+
+ネットワーク:
+  # 必須語（!付き）— このどれか1つ以上が無いと不合格
+  - "!network"
+  - "!networking"
+  - "!ネットワーク"
+  - "!router"
+  - "!ルータ"
+  - "!ルーター"
+  - "!switch"
+  - "!スイッチ"
+  - "!firewall"
+  - "!ファイアウォール"
+  - "!sd-wan"
+  - "!sase"
+  - "!sse"            # Security Service Edge（SASEの市場6割）
+  - "!ztna"           # Zero Trust Network Access
+  - "!ゼロトラスト"
+  - "!zero trust"
+  - "!naas"           # Network as a Service（急成長）
+  - "!wifi"
+  - "!wi-fi"
+  - "!5g"
+  - "!6g"
+  - "!lan"
+  - "!wan"
+  # ── 通常語：プロトコル・技術
+  - vpn
+  - bgp
+  - ospf
+  - is-is
+  - mpls
+  - dns
+  - dhcp
+  - tls
+  - ssl
+  - ipv6
+  - vxlan
+  - evpn
+  - segment routing
+  - srv6
+  - qos
+  - sdn                # Software Defined Network
+  - sdx                # Software Defined Everything
+  - intent-based
+  - microsegmentation
+  - マイクロセグメンテーション
+  - nac                # Network Access Control
+  - 800g               # AI backend向け高速イーサ
+  - 1.6t
+  - opentelemetry
+  - wi-fi 7
+  - wifi 7
+  - 802.1
+  - private 5g         # ローカル5G
+  - ローカル5g
+  # ── 通常語：運用・観測
+  - observability
+  - オブザーバビリティ
+  - telemetry
+  - テレメトリ
+  - aiops
+  - netops
+  - 監視
+  - パケット
+  - レイテンシ
+  - latency
+  - スループット
+  - throughput
+  # ── 通常語：主要ベンダー
+  - cisco
+  - juniper
+  - arista
+  - aruba
+  - hpe
+  - extreme
+  - nokia
+  - palo alto
+  - fortinet
+  - zscaler
+  - netskope
+  - versa
+  - cloudflare
+  - broadcom
+  - ntt
+  - kddi
+  - agentic ai
+  - ai agent
+  - aiエージェント
+
+クラウド:
+  # 必須語（!付き）
+  - "!cloud"
+  - "!クラウド"
+  - "!aws"
+  - "!azure"
+  - "!gcp"
+  - "!google cloud"
+  - "!oracle cloud"
+  - "!oci"
+  - "!ibm cloud"
+  - "!alibaba cloud"
+  - "!kubernetes"
+  - "!k8s"
+  - "!container"
+  - "!コンテナ"
+  - "!serverless"
+  - "!サーバーレス"
+  - "!データセンタ"
+  - "!datacenter"
+  - "!data center"
+  # ── 通常語：コンテナ／オーケストレーション
+  - docker
+  - containerd
+  - openshift
+  - rancher
+  - eks
+  - aks
+  - gke
+  - helm
+  - istio
+  - service mesh
+  - サービスメッシュ
+  - cilium
+  - ebpf
+  # ── 通常語：サーバーレス／コンピュート
+  - lambda
+  - fargate
+  - cloud run
+  - cloud functions
+  - ec2
+  - s3
+  - blob
+  # ── 通常語：IaC／運用
+  - terraform
+  - opentofu
+  - ansible
+  - pulumi
+  - iac
+  - gitops
+  - argocd
+  - devops
+  - devsecops
+  - platform engineering
+  - プラットフォームエンジニアリング
+  - sre
+  - finops
+  - observability
+  - オブザーバビリティ
+  # ── 通常語：モデル／形態
+  - paas
+  - iaas
+  - saas
+  - caas
+  - マルチクラウド
+  - multicloud
+  - multi-cloud
+  - ハイブリッドクラウド
+  - hybrid cloud
+  - クラウドネイティブ
+  - cloud native
+  - cncf
+  - エッジ
+  - edge computing
+  - クラウド移行
+  - リフトアンドシフト
+  # ── 通常語：AIインフラ（2026の主戦場）
+  - gpu
+  - nvidia
+  - h100
+  - h200
+  - blackwell
+  - 推論基盤
+  - inference
+  - ai factory
+  - aiファクトリー
+  - vector database
+  - ベクトルデータベース
+  # ── 通常語：データ基盤
+  - data lake
+  - データレイク
+  - lakehouse
+  - レイクハウス
+  - snowflake
+  - databricks
+  - bigquery
+  - redshift
+  - agentic ai
+  - ai agent
+  - aiエージェント
+
+Cisco:
+  # ── 必須語: 明確にCisco固有なブランド（単独でも誤マッチが少ない語）
+  - "!cisco"
+  # 注: "!シスコ" 単独は「サンフランシスコ」「フランシスコ」等の末尾に誤マッチするため不採用。
+  # 日本語の Cisco 記事を捕捉するためには具体的な複合語を使う。
+  - "!シスコシステムズ"
+  - "!シスコ社"
+  - "!cisco systems"
+  - "!talos"
+  - "!webex"
+  - "!meraki"
+  - "!catalyst"
+  - "!splunk"
+  - "!thousandeyes"
+  - "!hypershield"
+  - "!silicon one"
+  - "!catalyst center"
+  - "!isovalent"
+  - "!appdynamics"
+  - "!cisco iq"
+  - "!secure firewall"
+  - "!secure router"
+  # ── 必須語(compound): 英語の一般語と被るため、Cisco文脈で頻出する compound に限定
+  # 単独の `!nexus` は "Belarus-nexus" 等の一般語に誤マッチするため不採用
+  - "!cisco nexus"
+  - "!nexus 9000"
+  - "!nexus 9300"
+  - "!nexus 9500"
+  - "!nexus dashboard"
+  - "!nexus switch"
+  - "!cisco duo"
+  - "!duo security"
+  - "!duo mfa"
+  - "!duo authentication"
+  - "!cisco umbrella"
+  - "!umbrella dns"
+  - "!umbrella sig"
+  - "!cisco xdr"
+  - "!secure xdr"
+  - "!cisco aci"
+  - "!aci fabric"
+  - "!aci anywhere"
+  - "!aci multi-site"
+  - "!cisco ucs"
+  - "!ucs x-series"
+  - "!ucs manager"
+  - "!ucs b-series"
+  - "!cisco secure access"
+  - "!cisco secure endpoint"
+  # ── 通常語: 単独 must だと誤マッチするが、文脈補強用として残す
+  - thousand eyes
+  - nexus
+  - duo
+  - umbrella
+  - xdr
+  - aci
+  - ucs
+  - secure access
+  - secure endpoint
+  - defenseclaw
+  # Cisco固有プロダクト・サービス（通常語・補強用）
+  - outshift
+  - contact center
+  - professional service
+  - customer success
+  - boot
+  - nhi
+  # 文脈強化用（一般語）
+  - security
+  - セキュリティ
+  - quantum
+  - 量子
+  - pqc
+  - ポスト量子
+  - サイバーセキュリティ
+  - インテリジェンス
+  - ネットワーキング
+  - インフラ
+  - maintenance
+  - control hub
+  - cisco live
+  - rsa
+  - rsac
+  - quantum
+  - cve
+  - psirt
+  - announce
+  - release
+  - patch
+  - software
+  - hardware
+  - platform
+  - cisco it
+  - smart licens
+  - gartner
+  - infra
+  - network
+  - networking
+  - ネットワー
+  - sd-wan
+  - sase
+  - sse            # Security Service Edge（SASEの市場6割）
+  - ztna           # Zero Trust Network Access
+  - ゼロトラスト
+  - zero trust
+  - naas           # Network as a Service（急成長）
+  - wifi
+  - wi-fi
+  - 5g
+  - 6g
+  - lan
+  - wan
+  # ── 通常語：プロトコル・技術
+  - ai
+  - vpn
+  - bgp
+  - ospf
+  - is-is
+  - mpls
+  - dns
+  - dhcp
+  - tls
+  - ssl
+  - ipv6
+  - vxlan
+  - evpn
+  - segment routing
+  - srv6
+  - qos
+  - IaC
+  - SaC
+  - sdn                # Software Defined Network
+  - intent-based
+  - segmentation
+  - セグメンテーション
+  - nac                # Network Access Control
+  - opentelemetry
+  - 802.11
+  - private 5g         # ローカル5G
+  - ローカル5g
+  # ── 通常語：運用・観測
+  - observability
+  - オブザーバビリティ
+  - telemetry
+  - テレメトリ
+  - aiops
+  - netops
+  - 監視
+  - パケット
+  - レイテンシ
+  - latency
+  - スループット
+  - throughput
+  - layoff
+  - lay off
+  - release
+  - リリース
+  - business
+  - cybersecurity
+  - agentic ai
+  - ai agent
+  - aiエージェント
+
+${MYFAB_KEYWORD}:
+  # ── 必須語（!付き）— このどれか1つ以上が無いと不合格
+  # ${MYFAB_KEYWORD} / ${MYFAB_KEYWORD1} は .env で実値を定義。
+  # 例: MYFAB_KEYWORD=会社名, MYFAB_KEYWORD1=Company  (英日2バリエーション想定)
+  #
+  # ── 通常語（補強用）は categories-private.yml  ──
+  # ブランド名・パートナー企業・業界用語等の機密性のあるキーワードは
+  # categories-private.yml (gitignored) に定義され、実行時に自動マージされる。
+  # 公開リポジトリにはプレースホルダのみ残す設計。
