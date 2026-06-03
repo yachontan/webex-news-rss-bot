@@ -3,6 +3,7 @@
 
 # But track these project files / 以下のファイルは追跡する
 !.gitignore
+!LICENSE
 !.env.example
 !webex-news-rss-bot.py
 !analyze_filter.py

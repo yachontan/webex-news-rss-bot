@@ -1,11 +1,11 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v1.0.0-blue)
-![Release Date](https://img.shields.io/badge/release-2026--05--25-green)
+![Version](https://img.shields.io/badge/version-v1.0.1-blue)
+![Release Date](https://img.shields.io/badge/release-2026--06--03-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v1.0.0` ／ **Release Date**: 2026-05-25
+**Version**: `v1.0.1` ／ **Release Date**: 2026-06-03
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約スクリプト / RSS-to-Webex News Notifier with LLM Summary**
 
@@ -37,7 +37,7 @@ A Python script that collects today's RSS news, deduplicates, automatically summ
 
 | 機能 | 用途・詳細 | Description |
 |:---|:---|:---|
-| **複数RSSの一括取得** | `urls.yml` に登録した約170フィードを順次取得（フィード間 1秒sleep） | Sequential fetching from ~170 feeds |
+| **複数RSSの一括取得** | `urls.yml` に登録したフィードを順次取得（フィード間 1秒sleep） | Sequential fetching from ~170 feeds |
 | **スコアリング型カテゴリフィルタ** | `categories.yml` に定義したキーワードを **必須語(`!`)×3点 + 通常語×1点** でスコア計算、`>=4点`で合格 | Weighted keyword scoring (must×3 + normal×1, threshold 4) |
 | **単語境界マッチ** | 5文字以下の英数字キーワードは `\b` で境界判定（`lan`は `LAN`にマッチするが`plan`にはマッチしない） | Word-boundary regex for short ASCII keywords |
 | **Cisco限定URL深度マッチ** | URLに `cisco` を含む記事のみ URL文字列を判定対象に追加（Google News等の汎用URLによる誤マッチを防止） | URL inclusion limited to cisco domains |
@@ -171,23 +171,6 @@ channels:
       - ネットワークニュース
     categories:
       - AI・機械学習
-
-  - name: セキュリティニュース
-    webex_space_id: ${WEBEX_SPACE_ID_SECURITY}
-    categories: [セキュリティ]
-
-  - name: ネットワークニュース
-    webex_space_id: ${WEBEX_SPACE_ID_NETWORKING}
-    categories: [ネットワーク, クラウド]
-
-  - name: 世の中経済ニュース
-    webex_space_id: ${WEBEX_SPACE_ID_ECONOMY}
-    categories: [経済]
-
-  - name: Ciscoニュース
-    webex_space_id: ${WEBEX_SPACE_ID_CISCO}
-    priority: true                 # Cisco記事は独占配信（他チャンネルから除外）
-    categories: [Cisco]
 ```
 
 > Webex Bot トークンは `webex_bot_token` を省略すると `.env` の `WEBEX_BOT_TOKEN` を共通利用します。
