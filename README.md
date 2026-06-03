@@ -1,11 +1,11 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v1.0.2-blue)
+![Version](https://img.shields.io/badge/version-v1.0.3-blue)
 ![Release Date](https://img.shields.io/badge/release-2026--06--03-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v1.0.2` ／ **Release Date**: 2026-06-03
+**Version**: `v1.0.3` ／ **Release Date**: 2026-06-03
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約スクリプト / RSS-to-Webex News Notifier with LLM Summary**
 
@@ -28,6 +28,8 @@ A Python script that collects today's RSS news, deduplicates, automatically summ
 - [プライベートカテゴリ運用（my-fab パターン）/ Private Category Usage](#プライベートカテゴリ運用my-fab-パターン-private-category-usage)
 - [Claudeによる自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode](#claudeによる自動要約--超エコノミーモード--llm-summarization--eco-mode)
 - [自動実行 / Automation (cron)](#自動実行--automation-cron)
+- [macOS の制限と設計上の理由 / macOS Restrictions & Design Rationale](#macos-の制限と設計上の理由--macos-restrictions--design-rationale)
+- [Windows での利用 / Running on Windows](#windows-での利用--running-on-windows)
 - [ファイル構成 / File Structure](#ファイル構成--file-structure)
 - [トラブルシューティング / Troubleshooting](#トラブルシューティング--troubleshooting)
 
@@ -581,6 +583,111 @@ crontab -e
 ```cron
 0 9 * * * /<folder name>/rss-bot/bin/python /<folder name>/rss-bot/webex-news-rss-bot.py >> /<folder name>/rss-bot/log/cron_run.log 2>&1
 ```
+
+---
+
+## macOS の制限と設計上の理由 / macOS Restrictions & Design Rationale
+
+### なぜ `cron` ではなく `launchd` (plist) を使うのか / Why launchd instead of cron
+
+macOS では **`cron` はスリープ中に動作しません**。予定時刻に Mac がスリープしていると、その実行はそのままスキップされます。一方 `launchd` はスリープから復帰した際に missed job を実行できるため、毎朝確実にニュースを届けるには `launchd` が必須です。また Apple は公式に `cron` の代替として `launchd` を推奨しています。  
+On macOS, **`cron` does not fire while the Mac is asleep**. If the Mac is sleeping at the scheduled time, the job is simply skipped. `launchd`, macOS's native scheduler, can catch up on missed jobs after the system wakes. Apple officially recommends `launchd` as the modern replacement for `cron`.
+
+| 比較 / Comparison | `cron` | `launchd` (plist) |
+|:---|:---:|:---:|
+| スリープ復帰後に missed job を実行 / Catch up after sleep | ❌ | ✅ |
+| macOS 公式推奨 / Officially recommended by Apple | ❌ | ✅ |
+| ログ・環境変数の細かい制御 / Fine-grained log & env control | ❌ | ✅ |
+| Linux でも使える / Works on Linux | ✅ | ❌ |
+
+---
+
+### なぜスクリプトを `~/rss-bot`（ホーム直下）にコピーするのか / Why copy scripts to `~/rss-bot`
+
+macOS には **TCC（Transparency, Consent, and Control）** と呼ばれるプライバシー保護機能があり、`~/Documents`・`~/Desktop`・`~/Downloads` などのフォルダへのアクセスはユーザーの明示的な許可が必要です。  
+macOS enforces **TCC (Transparency, Consent, and Control)**, a privacy protection mechanism that requires explicit user approval to access folders such as `~/Documents`, `~/Desktop`, and `~/Downloads`.
+
+**問題 / The problem**: `launchd` はシステムデーモンとして動作するため、この TCC 許可を持っていません。`~/Documents` 配下のスクリプトをそのまま実行しようとすると、ファイルの読み書きがサイレントにブロックされたり、ログが出力されないまま失敗したりします。  
+**Problem**: `launchd` runs as a system daemon and does not hold TCC permissions. Executing scripts directly under `~/Documents` can result in silently blocked file I/O or missing log output.
+
+```
+~/Documents/98.Tools/python/rss-bot/   ← 🔒 TCC 保護対象 / TCC-protected (launchd からアクセス不可 / inaccessible to launchd)
+~/rss-bot/                             ← ✅ 保護対象外 / Not TCC-protected (launchd から自由にアクセス可 / freely accessible)
+```
+
+**解決策 / Solution**: `deploy_to_launchd.sh` がスクリプトと設定を `~/rss-bot` へコピー（同期）した上で、`launchd` はそこから実行します。これにより TCC の制限を回避できます。  
+`deploy_to_launchd.sh` syncs scripts and configs into `~/rss-bot`, where `launchd` runs them — bypassing TCC restrictions entirely.
+
+**副次的なメリット / Additional benefits**:
+
+| メリット | 内容 |
+|:---|:---|
+| **開発と本番の分離** | `~/Documents` 配下で設定を編集しても、`deploy` を叩くまで本番に反映されない |
+| **ログの確実な書き出し** | `~/rss-bot/log/` への書き込みが TCC に邪魔されない |
+| **デプロイの明示化** | 誤った設定変更が即座に本番へ影響するリスクがない |
+
+```
+📝 ~/Documents/.../rss-bot/   ← 開発・編集はここで / Edit here
+        ↓  bash deploy_to_launchd.sh
+🚀 ~/rss-bot/                  ← launchd が実行する本番環境 / Production env for launchd
+```
+
+---
+
+## Windows での利用 / Running on Windows
+
+本スクリプトの Python コード本体（`webex-news-rss-bot.py`）は `os.path` を使用しており、**Windows でもそのまま動作します**。スケジュール実行のみ OS 固有の対応が必要です。  
+The core Python script (`webex-news-rss-bot.py`) uses `os.path` and **runs on Windows without modification**. Only the scheduling mechanism needs OS-specific handling.
+
+### macOS との対応関係 / macOS → Windows mapping
+
+| macOS | Windows | 備考 |
+|:---|:---|:---|
+| `launchd` + `.plist` | **タスクスケジューラ** (Task Scheduler) | GUI または `schtasks` コマンドで設定 |
+| `deploy_to_launchd.sh` (bash) | **`deploy_to_taskscheduler.ps1`** (PowerShell) | 現時点では未同梱（下記参照） |
+| `~/rss-bot` へのコピー | **不要** | Windows に TCC 相当の制限はない |
+| `pmset` スリープ対策 | **不要** | タスクスケジューラはスリープ復帰後に実行可能 |
+
+### Windows でのセットアップ手順 / Setup on Windows
+
+#### 1. Python の仮想環境を作成・有効化 / Create and activate venv
+```powershell
+cd C:\path\to\rss-bot
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+#### 2. タスクスケジューラへの登録 / Register with Task Scheduler
+
+PowerShell から以下のコマンドで、毎日 09:01 に実行するタスクを登録できます。  
+Run the following PowerShell command to register a daily task at 09:01:
+
+```powershell
+$action  = New-ScheduledTaskAction `
+    -Execute "C:\path\to\rss-bot\venv\Scripts\python.exe" `
+    -Argument "C:\path\to\rss-bot\webex-news-rss-bot.py" `
+    -WorkingDirectory "C:\path\to\rss-bot"
+$trigger = New-ScheduledTaskTrigger -Daily -At "09:01"
+$settings = New-ScheduledTaskSettingsSet -WakeToRun  # スリープ復帰して実行
+Register-ScheduledTask -TaskName "webex-news-rss-bot" `
+    -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest
+```
+
+> `-WakeToRun` オプションにより、タスク実行時刻に PC がスリープ中でも自動的に復帰して実行されます（BIOS/UEFI の Wake Timer が有効な場合）。  
+> `-WakeToRun` wakes the PC from sleep at the scheduled time if the BIOS/UEFI Wake Timer is enabled.
+
+#### 3. 手動テスト実行 / Manual test run
+```powershell
+python webex-news-rss-bot.py --dry-run
+```
+
+### 現時点での制限 / Current limitations
+
+- `deploy_to_launchd.sh` に相当する **Windows 用デプロイスクリプト（PowerShell）は現時点では未同梱** です。需要があれば追加予定です。  
+  A Windows equivalent of `deploy_to_launchd.sh` (PowerShell) is **not yet included**. It may be added in a future release.
+- `.env` の読み込みは `python-dotenv` が担うため、Windows でも動作します。  
+  `.env` loading via `python-dotenv` works on Windows without changes.
 
 ---
 
