@@ -13,7 +13,7 @@
 !urls.yml.example
 !check_rooms.py
 !morning_messages.txt.example
-
+!categories-private.yml.example
 
 # Never track secrets or personal configs / シークレット情報等は絶対に追跡しない
 .env

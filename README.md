@@ -25,6 +25,7 @@ A Python script that collects today's RSS news, deduplicates, automatically summ
 - [使い方 / Usage](#使い方--usage)
 - [ルームID確認ツール / Room ID Checker (check_rooms.py)](#ルームid確認ツール--room-id-checker-check_roomspy)
 - [各種設定ファイル / Configuration Files](#各種設定ファイル--configuration-files)
+- [プライベートカテゴリ運用（my-fab パターン）/ Private Category Usage](#プライベートカテゴリ運用my-fab-パターン-private-category-usage)
 - [Claudeによる自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode](#claudeによる自動要約--超エコノミーモード--llm-summarization--eco-mode)
 - [自動実行 / Automation (cron)](#自動実行--automation-cron)
 - [ファイル構成 / File Structure](#ファイル構成--file-structure)
@@ -318,6 +319,151 @@ Stay ahead of the curve: Your daily digest arrives around X AM. 常に先を行�
 
 ---
 
+## プライベートカテゴリ運用（my-fab パターン）/ Private Category Usage
+
+公開リポジトリに **自社名・パートナー名・社内ブランド名** を直接書きたくない場合のための仕組みです。2つの方法を組み合わせて、機密情報をコードから完全に分離できます。  
+This section describes how to keep **company names, partner names, and internal brand names** out of your public repository. Two complementary mechanisms let you fully isolate sensitive data from the committed codebase.
+
+---
+
+### 方法1: `categories-private.yml` — 非公開キーワードオーバーレイ
+
+`categories.yml` と同じディレクトリに `categories-private.yml` を置くと、起動時に自動的に読み込まれ、`categories.yml` の内容に **追加マージ** されます。このファイルは `.gitignore` で管理対象外になっているため、リポジトリには一切含まれません。  
+テンプレートとして `categories-private.yml.example` が同梱されています。コピーして使い始めてください。  
+A template is included as `categories-private.yml.example`. Copy it to get started:  
+Place a `categories-private.yml` file in the same directory as `categories.yml`. It is automatically loaded at startup and **merged into** the existing category definitions. Because it is listed in `.gitignore`, it is never committed to the repository.  
+A starter template is included as `categories-private.yml.example`:
+
+```bash
+cp categories-private.yml.example categories-private.yml
+```
+
+#### できること / What you can do
+
+| 操作 | 説明 |
+|:---|:---|
+| **既存カテゴリへのキーワード追加** | 公開 `categories.yml` の `Cisco` や `セキュリティ` に、社内固有のキーワードを追記 |
+| **新規プライベートカテゴリの追加** | 公開ファイルには存在しない完全新規のカテゴリ（例: 自社ブランド名）を丸ごと定義 |
+
+**Merging into an existing category / 既存カテゴリへ追加:**
+```yaml
+# categories-private.yml
+Cisco:
+  - "!my internal product"   # Ciscoカテゴリに社内製品名の必須語を追加
+  - my-internal-alias
+
+セキュリティ:
+  - "!社内SIEM"
+  - "!インシデント対応"
+```
+起動ログに以下が出力されれば正常にマージされています：  
+If merged successfully, the startup log will show:
+```
+[INFO] categories-private.yml をマージ: 既存追加=[Cisco(+2), セキュリティ(+2)], 新規=[]
+```
+
+**Adding a brand-new private category / 新規カテゴリとして追加:**
+```yaml
+# categories-private.yml
+自社ブランド:          # ← 公開 categories.yml には存在しない完全新規カテゴリ
+  - "!自社ブランド名"
+  - "!MyFab"
+  - 社内プロダクト
+  - my-fab
+```
+```
+[INFO] categories-private.yml をマージ: 既存追加=[], 新規=[自社ブランド(15)]
+```
+
+---
+
+### 方法2: `${VAR}` 環境変数展開 — YAMLに会社名を直書きしない
+
+`categories.yml` や `bots.yml` の中で **`${VAR}` 形式のプレースホルダー** を使うと、実行時に `.env` の値で展開されます。YAML ファイル自体には会社名が含まれないため、そのままリポジトリに公開できます。  
+Use **`${VAR}` placeholders** inside `categories.yml` and `bots.yml`. They are resolved at runtime from `.env`. The YAML files themselves contain no sensitive names and can be safely committed.
+
+#### `categories.yml` での使い方 / Usage in `categories.yml`
+
+キーワード値だけでなく、**カテゴリ名（キー）自体**も `${VAR}` で展開できます。  
+Both keyword values and **category name keys** support `${VAR}` expansion.
+
+```yaml
+# categories.yml（公開リポジトリにそのままコミット可）
+${MY_FAB_BRAND}:           # カテゴリ名ごとプレースホルダー化
+  - "!${MY_FAB_KEYWORD1}"  # 必須キーワードも変数化
+  - "!${MY_FAB_KEYWORD2}"
+  - my-fab                 # 機密性のない汎用語はそのまま書いてOK
+
+Cisco:
+  - "!${MY_PARTNER_ALIAS}"  # 特定キーワードだけを変数化
+  - "!cisco"
+```
+
+```dotenv
+# .env（gitignore済み）
+MY_FAB_BRAND=自社ブランド
+MY_FAB_KEYWORD1=MyFab
+MY_FAB_KEYWORD2=my-fab-product
+MY_PARTNER_ALIAS=FabPartner
+```
+
+実行時に展開される結果 / Runtime result:
+```yaml
+# 展開後のイメージ（実際にはメモリ内のみ）
+自社ブランド:
+  - "!MyFab"
+  - "!my-fab-product"
+  - my-fab
+
+Cisco:
+  - "!FabPartner"
+  - "!cisco"
+```
+
+環境変数が未定義の場合、そのキーワードはスキップされ警告が出ます：  
+If an env var is undefined, the keyword is skipped with a warning:
+```
+[WARN] categories.yml: 環境変数 ['MY_FAB_KEYWORD1'] が未定義のためキーワード '!${MY_FAB_KEYWORD1}' をスキップ
+```
+
+#### `bots.yml` での使い方 / Usage in `bots.yml`
+
+チャンネル名・Space ID・Bot トークン・カテゴリ名のすべてを `${VAR}` で秘匿できます。  
+Channel name, Space ID, Bot token, and category name can all be hidden with `${VAR}`.
+
+```yaml
+# bots.yml（公開リポジトリにそのままコミット可）
+channels:
+  - name: ${MY_FAB_BRAND}ニュース        # チャンネル名を変数化
+    webex_space_id: ${WEBEX_SPACE_ID_MYFAB}
+    webex_bot_token: ${WEBEX_BOT_TOKEN_MYFAB}
+    priority: true
+    categories:
+      - ${MY_FAB_BRAND}                  # カテゴリ名も変数化
+```
+
+```dotenv
+# .env（gitignore済み）
+MY_FAB_BRAND=自社ブランド
+WEBEX_SPACE_ID_MYFAB=Y2lzY29zcGFyazovL3...
+WEBEX_BOT_TOKEN_MYFAB=NWQxYmU5ZW...
+```
+
+---
+
+### 2つの方法の使い分け / When to use each
+
+| 状況 | 推奨方法 |
+|:---|:---|
+| キーワードが多い・将来的に増える | `categories-private.yml` オーバーレイ（YAML として管理しやすい） |
+| 既存カテゴリに数語だけ追加したい | `${VAR}` 展開（別ファイルを作らずに済む） |
+| チャンネル名・Space ID を公開したくない | `bots.yml` の `${VAR}` 展開一択 |
+| 新規チャンネルごと非公開にしたい | 両方の組み合わせ（`bots.yml` で `${VAR}`、キーワードは `categories-private.yml`） |
+
+> **組み合わせ例 / Combined example**: `bots.yml` に `${MY_FAB_BRAND}` でチャンネルを定義し、キーワードは `categories-private.yml` に `${MY_FAB_BRAND}` カテゴリとして書く。`.env` で `MY_FAB_BRAND=自社ブランド` を設定するだけで両方が連動する。
+
+---
+
 ## Claudeによる自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode
 
 本スクリプトは、**Claude API** を用いて収集したニュースの概要を自然な日本語1〜2文（110字以内）に自動要約します。英文RSSは自動で日本語に翻訳されます。APIの課金を抑えるため、以下の**「超エコノミーモード（超節約設計）」**が自動適用されます。  
@@ -466,6 +612,7 @@ rss-bot/
 ├── categories.yml             # キーワードによるカテゴリ分け設定（必須語/通常語）
 ├── bots.yml                   # 配信チャンネル・カテゴリ紐付け（priority/defers_to対応）
 ├── bots.yml.example           # bots.yml テンプレート
+├── categories-private.yml.example  # 非公開キーワードオーバーレイのテンプレート
 ├── urls.yml                   # 取得元RSSフィードURLリスト (約170件)
 ├── morning_messages.txt       # 朝メッセージ（投稿末尾のランダム署名）のリスト
 ├── requirements.txt           # 依存ライブラリ一覧
