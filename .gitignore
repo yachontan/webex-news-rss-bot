@@ -5,14 +5,21 @@
 !.gitignore
 !.env.example
 !webex-news-rss-bot.py
+!analyze_filter.py
 !README.md
 !requirements.txt
 !categories.yml
 !bots.yml.example
 !urls.yml.example
+!check_rooms.py
+!morning_messages.txt.example
+
 
 # Never track secrets or personal configs / シークレット情報等は絶対に追跡しない
 .env
-webex-new-rss-bot.plist
+webex-news-rss-bot.plist
 categories-private.yml
 urls.yml
+deploy_to_launchd.sh
+morning_messages.txt
+webex_listener_bot.py
