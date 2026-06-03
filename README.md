@@ -1,11 +1,11 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v1.0.1-blue)
+![Version](https://img.shields.io/badge/version-v1.0.2-blue)
 ![Release Date](https://img.shields.io/badge/release-2026--06--03-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v1.0.1` ／ **Release Date**: 2026-06-03
+**Version**: `v1.0.2` ／ **Release Date**: 2026-06-03
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約スクリプト / RSS-to-Webex News Notifier with LLM Summary**
 
@@ -88,20 +88,22 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-`.env` を開き、使用するトークンやAPIキーを設定します。  
-Open `.env` and fill in your tokens / API keys:
-```dotenv
-# Webex Botトークン (共通デフォルト用) / Webex Bot token (shared default)
-WEBEX_BOT_TOKEN=your_webex_bot_token_here
-WEBEX_SPACE_ID=your_webex_space_id_here
+`.env` を開き、各項目に実際の値を設定します。`.env.example` にすべての変数の説明とデフォルト値が記載されています。  
+Open `.env` and fill in your actual values. All variables with descriptions are documented in `.env.example`.
 
-# Anthropic (Claude) API設定 (要約を利用する場合) / Anthropic API key (optional, for summarization)
-ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxx...
-ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+| 変数 | 必須 | 説明 |
+|:---|:---:|:---|
+| `WEBEX_BOT_TOKEN` | ✅ | Webex Bot のアクセストークン |
+| `WEBEX_SPACE_ID` | ✅ | 送信先 Webex スペース ID（シングルボットモード） |
+| `WEBEX_SPACE_ID_*` | — | マルチチャンネルモード用 Space ID（`bots.yml` で参照） |
+| `WEBEX_BOT_TOKEN_*` | — | チャンネル別 Bot トークン（省略時は共通トークンを使用） |
+| `ANTHROPIC_API_KEY` | — | Claude API キー（要約機能を使う場合のみ） |
+| `ANTHROPIC_MODEL` | — | 使用するモデル名（デフォルト: `claude-haiku-4-5-20251001`） |
+| `SSL_VERIFY` | — | `false` にすると SSL 検証を無効化（社内プロキシ等） |
+| `MYFAB_KEYWORD` 等 | — | プライベートカテゴリ用（my-fab パターン参照） |
 
-# SSL検証設定 / SSL verification (set False for corporate proxy / Mac cert issues)
-SSL_VERIFY=false
-```
+> `.env` は `.gitignore` により Git 管理対象外です。絶対にコミットしないでください。  
+> `.env` is excluded by `.gitignore` and must never be committed.
 
 ---
 
