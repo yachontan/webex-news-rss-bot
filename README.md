@@ -1,11 +1,11 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v1.0.3-blue)
+![Version](https://img.shields.io/badge/version-v1.0.4-blue)
 ![Release Date](https://img.shields.io/badge/release-2026--06--03-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v1.0.3` ／ **Release Date**: 2026-06-03
+**Version**: `v1.0.4` ／ **Release Date**: 2026-06-11
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約スクリプト / RSS-to-Webex News Notifier with LLM Summary**
 
@@ -523,9 +523,9 @@ bash deploy_to_launchd.sh
 
 > **ヒント / Tips**:
 > - 手動で今すぐテスト実行したい場合: `launchctl start com.webex-news.rssbot`
-> - 実行ログの確認: `~/rss-bot/log/launchd_run.log` に出力されます（macOS の TCC 保護を回避するため `~/rss-bot` 直下に配置）。
+> - 実行ログの確認: `~/rss-bot/log/launchd_run-YYYYMMDD-HHMMSS.log` に出力されます（実行ごとにタイムスタンプ付きで生成）。
 > - Manual test run: `launchctl start com.webex-news.rssbot`
-> - View logs: `~/rss-bot/log/launchd_run.log` (located under `~/` to bypass macOS TCC protection of `Documents/`)
+> - View logs: `~/rss-bot/log/launchd_run-YYYYMMDD-HHMMSS.log` (timestamped per run; located under `~/` to bypass macOS TCC protection of `Documents/`)
 
 #### ⏰ Mac スリープ対策（重要）/ Critical: Wake Mac from Sleep
 
@@ -711,7 +711,7 @@ rss-bot/
 ├── .env                       # 認証情報＆環境変数（Git対象外）
 ├── .env.example               # 環境変数のテンプレート
 ├── .gitignore                 # Git除外設定
-├── log/                       # 実行ログディレクトリ（launchd_run.log, launchd_err.log）
+├── log/                       # 実行ログディレクトリ（launchd_run-YYYYMMDD-HHMMSS.log / launchd_err-YYYYMMDD-HHMMSS.log）
 └── README.md                  # このドキュメント
 ```
 
@@ -761,7 +761,7 @@ rss-bot/
 
 ### ❌ ある日 launchd が実行されなかった (Webex に配信が来なかった)
 
-**症状 / Symptom**: 平日のはずなのに ~/rss-bot/log/launchd_run.log の最後の `実行時刻` がその日を飛ばしている。
+**症状 / Symptom**: 平日のはずなのに `~/rss-bot/log/` にその日付のログファイルが存在しない。
 
 **原因 / Cause**: その日の予定時刻 (例: 09:01) に **Mac がスリープしていた**。macOS の launchd は `StartCalendarInterval` 予定時刻に Mac がスリープ中だと job を起動しません。  
 The Mac was asleep at the scheduled time. macOS `launchd` does **not** fire `StartCalendarInterval` jobs while asleep.
@@ -769,7 +769,7 @@ The Mac was asleep at the scheduled time. macOS `launchd` does **not** fire `Sta
 **確認方法 / Verification**:
 ```bash
 # 実行履歴の確認
-grep "実行時刻" ~/rss-bot/log/launchd_run.log | tail -10
+ls -lt ~/rss-bot/log/ | head -10
 
 # 現在のスケジュール wake が登録されているか
 pmset -g sched

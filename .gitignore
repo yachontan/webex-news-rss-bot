@@ -15,12 +15,12 @@
 !check_rooms.py
 !morning_messages.txt.example
 !categories-private.yml.example
+!deploy_to_launchd.sh
 
 # Never track secrets or personal configs / シークレット情報等は絶対に追跡しない
 .env
 webex-news-rss-bot.plist
 categories-private.yml
 urls.yml
-deploy_to_launchd.sh
 morning_messages.txt
 webex_listener_bot.py
