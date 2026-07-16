@@ -4,5 +4,13 @@
 # 収集するRSSフィードのURLリスト / RSS feed URL list
 # ============================================================
 # example <list style>
-# - https://<your rss url1> 
-# - https://<your rss url2> 
+# - https://<your rss url1>
+# - https://<your rss url2>
+#
+# 名前付きグループ / Named group (optional):
+#   bots.yml の source_groups から参照する専用フィードをまとめる。
+#   URL の正本を urls.yml に一本化し、bots.yml には URL を書かずグループ名だけ指定する。
+# - group: cisco-advisory
+#   urls:
+#     - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
+#     - https://sec.cloudapps.cisco.com/security/center/csaf_20.xml

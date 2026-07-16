@@ -22,6 +22,9 @@ import yaml
 import random
 import re
 
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
+
 from dotenv import load_dotenv
 
 # --- 環境変数の読み込み / Load environment variables ---
@@ -36,6 +39,8 @@ WEBEX_BOT_TOKEN = os.getenv("WEBEX_BOT_TOKEN", "")
 WEBEX_SPACE_ID  = os.getenv("WEBEX_SPACE_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
+# 再ランク（stratified_pick の置き換え）専用モデル。要約用の ANTHROPIC_MODEL とは別枠。
+ANTHROPIC_RERANK_MODEL = os.getenv("ANTHROPIC_RERANK_MODEL", "claude-haiku-4-5-20251001")
 SSL_VERIFY        = os.getenv("SSL_VERIFY", "True").strip().lower() != "false"
 
 # SSL検証を無効にする場合、警告を非表示にします
@@ -70,32 +75,79 @@ def load_random_morning_message(path: str = MORNING_MESSAGES_FILE) -> str:
         print(f"  [WARN] 朝メッセージファイルの読み込みに失敗しました: {e}")
     return ""
 
-def load_urls(path: str = URLS_FILE) -> list[str]:
-    """
-    urls.yml からRSSフィードのURLリストを読み込みます。
-    Loads RSS feed URLs from urls.yml.
-    """
+def _read_urls_yaml(path: str) -> list:
+    """urls.yml を読み込んで生のリストを返す内部関数。"""
     if not os.path.exists(path):
         print(f"[ERROR] RSSフィード設定ファイルが見つかりません: {path}")
         sys.exit(1)
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        if not isinstance(data, list):
-            print("[ERROR] urls.yml の形式が正しくありません。リスト形式（- URL）で記述してください。")
-            sys.exit(1)
-        return [str(url).strip() for url in data if url]
     except yaml.YAMLError as e:
         print(f"[ERROR] urls.yml の解析に失敗しました: {e}")
         sys.exit(1)
+    if not isinstance(data, list):
+        print("[ERROR] urls.yml の形式が正しくありません。リスト形式（- URL）で記述してください。")
+        sys.exit(1)
+    return data
+
+
+def load_urls(path: str = URLS_FILE) -> list[str]:
+    """
+    urls.yml から収集対象の全RSSフィードURLを平坦なリストで読み込みます。
+    Loads all RSS feed URLs (flattened) from urls.yml.
+
+    urls.yml の各要素は次のどちらでもよい:
+      - 文字列                         : 通常のフィードURL
+      - {group: <名前>, urls: [<URL>...]} : 名前付きグループ（bots.yml の
+        source_groups から参照される。URL の正本は urls.yml に一本化する用途）
+    どちらの形式でも、ここでは収集対象として全URLを平坦化して返す。
+    """
+    data = _read_urls_yaml(path)
+    urls: list[str] = []
+    for item in data:
+        if not item:
+            continue
+        if isinstance(item, dict):
+            # グループ形式: {group: name, urls: [...]}
+            for u in (item.get("urls") or []):
+                if u:
+                    urls.append(str(u).strip())
+        else:
+            urls.append(str(item).strip())
+    # 重複排除（順序保持）
+    return list(dict.fromkeys(urls))
+
+
+def load_url_groups(path: str = URLS_FILE) -> dict[str, list[str]]:
+    """
+    urls.yml 内の名前付きグループを {グループ名: [URL, ...]} で返します。
+    Returns named URL groups defined in urls.yml as {group_name: [urls]}.
+
+    bots.yml の source_groups からフィードを URL 直書きせずに参照するために使う。
+    """
+    data = _read_urls_yaml(path)
+    groups: dict[str, list[str]] = {}
+    for item in data:
+        if isinstance(item, dict) and item.get("group"):
+            name = str(item["group"]).strip()
+            urls = [str(u).strip() for u in (item.get("urls") or []) if u]
+            if name:
+                groups.setdefault(name, []).extend(urls)
+    return groups
 
 # ===========================================================
 # LLM (Claude) 要約処理 / LLM (Claude) Summarization
 # ===========================================================
 
-def summarize_with_claude(title: str, summary: str, api_key: str, model: str = "claude-3-haiku-20240307") -> str:
+def summarize_with_claude(title: str, summary: str, api_key: str, model: str = "claude-3-haiku-20240307", is_advisory: bool = False) -> str:
     """
     Claude API を使用して記事を要約します。
+
+    is_advisory=True（Cisco Security Advisory）の場合は、深刻度に見合う影響
+    （攻撃前提・想定被害）を簡潔にまとめる専用プロンプトを使う。
+    ※ CVSS の数値はプロンプトで問い合わせない（課金削減）。深刻度はモデルが本文から
+      推測し、数値自体はタイトル行のバッジ（CVRF 由来の実値）で表示する。
     """
     if not api_key:
         return summary
@@ -106,17 +158,27 @@ def summarize_with_claude(title: str, summary: str, api_key: str, model: str = "
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
-    
+
     # 圧縮プロンプト: 主要制約を最短で記述（約45トークン）
     # - ラベル/前置き禁止: タイトル：/概要：等を防止
     # - 情報不足要求禁止: 「本文を提供してください」等を防止
     # - 英文は翻訳: 英語RSSを日本語化
-    prompt = (
-        "日本語110字以内1〜2文で要約のみ出力。"
-        "ラベル/前置き/改行/情報不足要求は禁止。"
-        "提供情報のみで完結、英文は翻訳。\n\n"
-        f"T: {title}\nS: {summary}"
-    )
+    if is_advisory:
+        # Cisco Security Advisory 専用: 深刻度に見合う影響を簡潔に。
+        # CVSS の数値は問い合わせない（別途バッジ表示。echo が出ても後段で除去）。
+        prompt = (
+            "日本語110字以内1〜2文で要約のみ出力。"
+            "ラベル/前置き/改行/情報不足要求は禁止。"
+            "深刻度に見合う影響（攻撃前提・想定被害）を簡潔に。英文は翻訳。\n\n"
+            f"T: {title}\nS: {summary}"
+        )
+    else:
+        prompt = (
+            "日本語110字以内1〜2文で要約のみ出力。"
+            "ラベル/前置き/改行/情報不足要求は禁止。"
+            "提供情報のみで完結、英文は翻訳。\n\n"
+            f"T: {title}\nS: {summary}"
+        )
 
     payload = {
         "model": model,  # 指定されたClaudeモデルを使用
@@ -173,11 +235,155 @@ def summarize_entries_in_place(entries: list[dict], api_key: str, cache: dict, m
 
         action = "翻訳・要約中" if not is_japanese else "要約中"
         print(f"      {action} (モデル: {model}): {entry['title'][:25]}...")
-        new_summary = summarize_with_claude(entry["title"], entry["summary"], api_key, model=model)
+        is_advisory = "/CiscoSecurityAdvisory/" in (entry.get("link") or "")
+        new_summary = summarize_with_claude(
+            entry["title"], entry["summary"], api_key, model=model, is_advisory=is_advisory
+        )
+        # CVSS 付きエントリは、LLM が概要から CVSS を拾って要約に混ぜることがあるため除去する
+        # （プロンプトでは CVSS を問い合わせない。数値はタイトル行のバッジで表示。二重表示防止）。
+        if entry.get("cvss"):
+            new_summary = _strip_cvss_mentions(new_summary)
         cache[link] = new_summary
         entry["summary"] = new_summary
         time.sleep(0.5)  # レート制限対策
     print("    --- 要約完了 ---")
+
+
+# ===========================================================
+# Cisco Security Advisory の CVSS スコア取得 / CVSS enrichment
+# ===========================================================
+#
+# CVSS スコアは RSS の本文には含まれず、各 advisory の詳細ページ（URL 先）にある。
+# LLM に渡すのは RSS のタイトル＋概要だけなので、プロンプトだけでは正確な CVSS を
+# 出せない（捏造になる）。そこで Cisco が公開している構造化データ（advisory ごとの
+# CVRF XML）から実スコアを取得して表示する。
+#
+#   CVRF URL 例:
+#     https://sec.cloudapps.cisco.com/security/center/contentxml/
+#       CiscoSecurityAdvisory/<advisory-id>/cvrf/<advisory-id>_cvrf.xml
+#   スコアは <BaseScoreV3>9.1</BaseScoreV3>（CVSS v3）。複数 CVE があれば複数出現する。
+
+_CVSS_CACHE: dict[str, tuple[str, str]] = {}
+_ADVISORY_LINK_RE = re.compile(r'/CiscoSecurityAdvisory/([A-Za-z0-9][A-Za-z0-9\-_]+)')
+_BASESCORE_V3_RE = re.compile(r'<BaseScoreV3>\s*([0-9]+(?:\.[0-9])?)\s*</BaseScoreV3>')
+_BASESCORE_V2_RE = re.compile(r'<BaseScore>\s*([0-9]+(?:\.[0-9])?)\s*</BaseScore>')
+
+
+# 要約文に紛れ込む CVSS 表記（LLM の echo や生 RSS 由来）を除去するための正規表現。
+# 例: "**CVSS: 7.8**" / "CVSS 7.5〜9.1（複数該当）" / "CVSS：5.5" など。
+# CVSS の数値はタイトル行のバッジで表示するため、要約文からは取り除いて二重表示を防ぐ。
+_CVSS_MENTION_RE = re.compile(
+    r'\s*(?:\*\*)?\s*CVSS\s*(?:Base\s*Score)?\s*[:：]?\s*'
+    r'[0-9]+(?:\.[0-9])?(?:\s*[〜～~]\s*[0-9]+(?:\.[0-9])?)?'
+    r'\s*(?:（複数該当）)?\s*(?:\*\*)?',
+    re.IGNORECASE,
+)
+
+
+def _strip_cvss_mentions(text: str) -> str:
+    """要約文中の CVSS 表記を除去し、余分な空白を整える（数値はバッジで別途表示）。"""
+    if not text:
+        return text
+    cleaned = _CVSS_MENTION_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _advisory_id_from_link(link: str) -> str | None:
+    """Cisco Security Advisory の URL から advisory ID を取り出す。該当しなければ None。"""
+    if not link or "/CiscoSecurityAdvisory/" not in link:
+        return None
+    m = _ADVISORY_LINK_RE.search(link)
+    return m.group(1) if m else None
+
+
+def _format_cvss(scores: list[float]) -> str:
+    """
+    CVSS スコアのリストを表示文字列に整形する。
+      - 0件           : "" （表示しない）
+      - 1種類         : "9.1"
+      - 複数種類      : "7.5〜9.1（複数該当）"  （最小〜最大）
+    """
+    uniq = sorted(set(scores))
+    if not uniq:
+        return ""
+    if len(uniq) == 1:
+        return f"{uniq[0]:.1f}"
+    return f"{uniq[0]:.1f}〜{uniq[-1]:.1f}（複数該当）"
+
+
+def _cvss_color(score: float) -> str:
+    """
+    CVSS Base Score を、標準的な CVSS v3.x 深刻度バンドに沿って危険度カラーに割り当てる。
+      - 9.0〜10.0 : Critical → 🔴
+      - 7.0〜 8.9 : High     → 🟠
+      - 0.1〜 6.9 : Medium / Low → 🟡
+    複数スコアがある場合は最大値（最悪ケース）で色を決める想定で呼び出す。
+    """
+    if score >= 9.0:
+        return "🔴"
+    if score >= 7.0:
+        return "🟠"
+    return "🟡"
+
+
+def fetch_cisco_cvss(link: str) -> tuple[str, str]:
+    """
+    Cisco Security Advisory の CVRF から CVSS Base Score を取得し、
+    (表示文字列, 危険度カラー絵文字) を返す。
+    advisory でない・取得失敗・スコア無しの場合は ("", "") を返す（表示しない）。
+    色は複数スコア時は最大値（最悪ケース）で決定する。
+    """
+    adv_id = _advisory_id_from_link(link)
+    if not adv_id:
+        return "", ""
+    if adv_id in _CVSS_CACHE:
+        return _CVSS_CACHE[adv_id]
+
+    cvrf_url = (
+        "https://sec.cloudapps.cisco.com/security/center/contentxml/"
+        f"CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml"
+    )
+    result: tuple[str, str] = ("", "")
+    try:
+        resp = requests.get(
+            cvrf_url,
+            headers={"User-Agent": "rss-bot/1.0 (+RSS aggregator; feed reader)"},
+            timeout=15,
+            verify=SSL_VERIFY,
+        )
+        if resp.status_code == 200:
+            scores = [float(x) for x in _BASESCORE_V3_RE.findall(resp.text)]
+            if not scores:  # v3 が無ければ v2 にフォールバック
+                scores = [float(x) for x in _BASESCORE_V2_RE.findall(resp.text)]
+            if scores:
+                result = (_format_cvss(scores), _cvss_color(max(scores)))
+    except Exception as e:
+        print(f"    [WARN] CVSS 取得失敗（{adv_id}）: {e}")
+        result = ("", "")
+
+    _CVSS_CACHE[adv_id] = result
+    return result
+
+
+def enrich_cisco_cvss_in_place(entries: list[dict]) -> None:
+    """
+    Cisco Security Advisory のエントリに CVSS スコア（entry["cvss"]）を付与する。
+    advisory でないエントリは何もしない（ネットワーク取得も行わない）。
+    """
+    targets = [e for e in entries if "/CiscoSecurityAdvisory/" in (e.get("link") or "")]
+    if not targets:
+        return
+    print(f"    --- CVSS 取得処理を開始 (対象: {len(targets)} 件) ---")
+    for e in targets:
+        cvss, color = fetch_cisco_cvss(e.get("link", ""))
+        if cvss:
+            e["cvss"] = cvss
+            e["cvss_color"] = color
+            # 生 RSS 本文に CVSS 表記が含まれる場合に備え、この時点でも除去しておく
+            # （要約が無効=APIキー未設定でもバッジと二重表示にならないように）。
+            e["summary"] = _strip_cvss_mentions(e.get("summary", ""))
+            print(f"      {color} CVSS {cvss}: {e['title'][:30]}...")
+    print("    --- CVSS 取得完了 ---")
 
 _CAT_ENV_VAR_RE = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}')
 
@@ -309,10 +515,22 @@ def load_bots(path: str = BOTS_FILE) -> list[dict]:
                     print(f"  [WARN] bots.yml channel[{i}]: name '{ch['name']}' に未定義の環境変数があります")
                 else:
                     ch["name"] = resolved_name
+            # webex_space_id / webex_bot_token の ${VAR} を .env から展開する。
+            # 未定義で ${VAR} がそのまま残る場合は「未設定」とみなして空文字にし、
+            # 実行時にそのチャンネルだけスキップできるようにする（トークンを後から
+            # 用意する運用に対応。例: 新設した Cisco Security Advisories チャンネル）。
             if "webex_space_id" in ch and isinstance(ch["webex_space_id"], str):
-                ch["webex_space_id"] = os.path.expandvars(ch["webex_space_id"])
+                expanded = os.path.expandvars(ch["webex_space_id"])
+                if "${" in expanded:
+                    print(f"  [WARN] bots.yml channel[{i}] ({ch.get('name','?')}): webex_space_id の環境変数が未解決です → このチャンネルはスキップされます")
+                    expanded = ""
+                    ch["_skip_reason"] = "webex_space_id 未設定（環境変数が未解決）"
+                ch["webex_space_id"] = expanded
             if "webex_bot_token" in ch and isinstance(ch["webex_bot_token"], str):
-                ch["webex_bot_token"] = os.path.expandvars(ch["webex_bot_token"])
+                expanded_tok = os.path.expandvars(ch["webex_bot_token"])
+                if "${" in expanded_tok:
+                    expanded_tok = ""
+                ch["webex_bot_token"] = expanded_tok
             # categories リスト内の ${VAR} も .env から展開する
             # 例: ["${MYFAB_KEYWORD}"] + .env MYFAB_KEYWORD=my-fab → ["my-fab"]
             # 用途: カテゴリ名を公開リポジトリに露出させたくない場合
@@ -331,7 +549,10 @@ def load_bots(path: str = BOTS_FILE) -> list[dict]:
                         expanded_cats.append(cat_str)
                 ch["categories"] = expanded_cats
 
-            if not ch.get("webex_space_id"):
+            # webex_space_id キー自体が無い場合のみ設定ミスとして停止する。
+            # キーはあるが環境変数が未解決（_skip_reason 付き）の場合は、
+            # 停止せず実行時にそのチャンネルだけスキップする。
+            if "webex_space_id" not in ch:
                 print(f"[ERROR] bots.yml の channel[{i}] ({ch.get('name', '?')}) に webex_space_id がありません。")
                 sys.exit(1)
         return channels
@@ -344,8 +565,13 @@ def load_bots(path: str = BOTS_FILE) -> list[dict]:
 # RSS フィード取得 / RSS collection
 # ===========================================================
 
-def _parse_entry(entry) -> dict | None:
-    """feedparser のエントリを辞書に変換します。日時情報がない場合は None を返します。"""
+def _parse_entry(entry, source_feed: str = "") -> dict | None:
+    """feedparser のエントリを辞書に変換します。日時情報がない場合は None を返します。
+
+    source_feed には、このエントリを取得した RSS フィードの URL を記録する。
+    後段のソースベース振り分け（bots.yml の source_feeds）で、記事本文のキーワードで
+    はなく「どのフィード由来か」でチャンネルを決めるために使う。
+    """
     if hasattr(entry, "published_parsed") and entry.published_parsed:
         published_dt = datetime.datetime(*entry.published_parsed[:6], tzinfo=datetime.timezone.utc)
     elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
@@ -364,6 +590,7 @@ def _parse_entry(entry) -> dict | None:
         "summary":  summary_clean,
         "tags":     [t.get("term", "") for t in getattr(entry, "tags", [])],
         "fallback": False,
+        "source_feed": source_feed,
     }
 
 
@@ -420,7 +647,7 @@ def get_recent_rss_entries(
             return entries
 
         for entry in feed.entries:
-            parsed = _parse_entry(entry)
+            parsed = _parse_entry(entry, source_feed=feed_url)
             if parsed is None:
                 continue
             all_parsed.append(parsed)
@@ -434,15 +661,37 @@ def get_recent_rss_entries(
 
 
 def collect_all_entries(rss_urls: list[str], hours_ago: int, fallback_items: int) -> list[dict]:
-    """全RSSフィードから記事を収集し、重複排除を行います。 / Collect entries from all RSS feeds and deduplicate."""
-    all_entries: list[dict] = []
+    """全RSSフィードから記事を収集し、重複排除を行います。 / Collect entries from all RSS feeds and deduplicate.
+
+    取得はホスト別にグループ化し、ThreadPoolExecutor でホスト単位のワーカーを
+    並列実行する（max_workers=12）。各ワーカーは自ホストの URL を直列処理し、
+    リクエスト間に time.sleep(1.0) を挟む（同一ホストへの礼儀）。
+    """
+    # ホスト別にグループ化 / Group URLs by host (netloc)
+    host_groups: dict[str, list[str]] = {}
     for url in rss_urls:
-        print(f"  取得中: {url}")
-        # フォールバックをやめるため、get_recent_rss_entries には fallback_items=0 を渡します
-        entries = get_recent_rss_entries(url, hours_ago=hours_ago, fallback_items=0)
-        print(f"    → {len(entries)} 件")
-        all_entries.extend(entries)
-        time.sleep(1)
+        host = urlparse(url).netloc
+        host_groups.setdefault(host, []).append(url)
+
+    def _fetch_host(urls: list[str]) -> list[dict]:
+        """1ホスト分の URL を直列取得する（別スレッドで実行）。"""
+        results: list[dict] = []
+        for i, url in enumerate(urls):
+            # フォールバックをやめるため、get_recent_rss_entries には fallback_items=0 を渡します
+            entries = get_recent_rss_entries(url, hours_ago=hours_ago, fallback_items=0)
+            # スレッド間のログのインターリーブを防ぐため、URL と件数を1回の print で出力
+            print(f"  取得: {url} → {len(entries)} 件")
+            results.extend(entries)
+            if i < len(urls) - 1:
+                time.sleep(1.0)  # 同一ホストへの連続リクエスト間隔を維持
+        return results
+
+    all_entries: list[dict] = []
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        for host_results in executor.map(_fetch_host, host_groups.values()):
+            all_entries.extend(host_results)
+
+    print(f"  [INFO] 収集完了: {len(all_entries)} 件（重複排除前 / {len(host_groups)} ホスト）")
 
     # 重複排除 / Deduplicate
     # 日本語ニュースは SequenceMatcher（文字単位）だけでは類似度が低く出る傾向があるため、
@@ -467,6 +716,18 @@ def collect_all_entries(rss_urls: list[str], hours_ago: int, fallback_items: int
     KANJI_INTER_MIN = 5
     SEQ_MID = 0.55
     SUMMARY_MID = 0.55
+    # 英語タイトル向け word Jaccard（漢字bigramと対称の判定軸）
+    WORD_JACCARD_MIN = 0.5
+    WORD_MIN_TOKENS = 4
+
+    # 英語トークンから除外する高頻度語（内容語のみで類似度を測るため）
+    STOPWORDS = {
+        "the", "and", "for", "with", "from", "that", "this", "are", "was", "has",
+        "have", "its", "their", "after", "over", "into", "new", "how", "why", "what",
+        "when", "will", "says", "said", "can", "could", "more", "than", "been", "were",
+        "not", "but", "you", "your", "off", "out", "about", "against", "between",
+        "during", "under", "amid", "per", "via", "vs", "amp",
+    }
 
     _KANJI_RE = re.compile(r'[一-龯]')
     # 媒体名サフィックス/プレフィックス除去: "(共同通信)" / " - 朝日新聞" / "【速報】"
@@ -491,14 +752,32 @@ def collect_all_entries(rss_urls: list[str], hours_ago: int, fallback_items: int
             return set()
         return set(kanji_only[i:i+2] for i in range(len(kanji_only) - 1))
 
-    def _is_duplicate(t_a, t_b, s_a, s_b):
-        t_a_n = _normalize_title(t_a)
-        t_b_n = _normalize_title(t_b)
-        seq = difflib.SequenceMatcher(None, t_a_n, t_b_n).ratio()
+    def _english_tokens(norm_title: str) -> set:
+        """正規化済み小文字タイトルから、長さ3以上・ストップワード以外の英数トークン集合を作る。"""
+        toks = re.findall(r'[a-z0-9]+', norm_title)
+        return {t for t in toks if len(t) >= 3 and t not in STOPWORDS}
+
+    # 前計算: 各エントリについて (正規化タイトル小文字, 漢字bigram集合, 英語トークン集合,
+    # 概要小文字, 情報量=タイトル+概要の文字数) を1回だけ計算しておく。
+    # dedupe の全ペア比較のたびに再計算していた無駄を省く。
+    precomputed: list[tuple] = []
+    for entry in all_entries:
+        norm = _normalize_title(entry['title'].lower().strip())
+        precomputed.append((
+            norm,
+            _kanji_bigrams(norm),
+            _english_tokens(norm),
+            entry['summary'].lower().strip(),
+            len(entry['title']) + len(entry['summary']),
+        ))
+
+    def _is_duplicate(pa: tuple, pb: tuple) -> bool:
+        norm_a, bg_a, tok_a, s_a, _ = pa
+        norm_b, bg_b, tok_b, s_b, _ = pb
+        seq = difflib.SequenceMatcher(None, norm_a, norm_b).ratio()
         if seq >= SEQ_HIGH:
             return True
         # 漢字bigram の重なり指標
-        bg_a, bg_b = _kanji_bigrams(t_a_n), _kanji_bigrams(t_b_n)
         if bg_a and bg_b:
             inter = len(bg_a & bg_b)
             union = len(bg_a | bg_b)
@@ -509,6 +788,14 @@ def collect_all_entries(rss_urls: list[str], hours_ago: int, fallback_items: int
                 return True
             if overlap >= KANJI_OVERLAP_MIN and inter >= KANJI_INTER_MIN:
                 return True
+        # 英語 word Jaccard（漢字bigramブロックと対称の位置）
+        # 両タイトルの英語トークンがそれぞれ4語以上あるときのみ評価
+        if len(tok_a) >= WORD_MIN_TOKENS and len(tok_b) >= WORD_MIN_TOKENS:
+            w_inter = len(tok_a & tok_b)
+            w_union = len(tok_a | tok_b)
+            w_jaccard = w_inter / w_union if w_union else 0
+            if w_jaccard >= WORD_JACCARD_MIN:
+                return True
         # フォールバック: タイトル中程度 + 概要も類似
         if seq >= SEQ_MID and s_a and s_b:
             summary_ratio = difflib.SequenceMatcher(None, s_a, s_b).ratio()
@@ -516,25 +803,22 @@ def collect_all_entries(rss_urls: list[str], hours_ago: int, fallback_items: int
                 return True
         return False
 
-    deduped_entries = []
-    for entry in all_entries:
+    deduped_entries: list[dict] = []
+    deduped_pre: list[tuple] = []
+    for entry, pre in zip(all_entries, precomputed):
         is_duplicate = False
-        title_a = entry['title'].lower().strip()
-        summary_a = entry['summary'].lower().strip()
-        len_a = len(entry['title']) + len(entry['summary'])
+        len_a = pre[4]
 
-        for idx, existing in enumerate(deduped_entries):
-            title_b = existing['title'].lower().strip()
-            summary_b = existing['summary'].lower().strip()
-
-            if _is_duplicate(title_a, title_b, summary_a, summary_b):
+        for idx, existing_pre in enumerate(deduped_pre):
+            if _is_duplicate(pre, existing_pre):
                 is_duplicate = True
+                existing = deduped_entries[idx]
                 # 残すべき記事の選択基準:
                 #  ① 公開日時が新しい方を優先（最新情報を採用）
                 #  ② 同時刻なら情報量（タイトル+概要の文字数）が多い方を採用
                 existing_pub = existing.get('published')
                 entry_pub = entry.get('published')
-                len_b = len(existing['title']) + len(existing['summary'])
+                len_b = existing_pre[4]
                 replace = False
                 if entry_pub and existing_pub and entry_pub != existing_pub:
                     replace = entry_pub > existing_pub
@@ -542,10 +826,12 @@ def collect_all_entries(rss_urls: list[str], hours_ago: int, fallback_items: int
                     replace = len_a > len_b
                 if replace:
                     deduped_entries[idx] = entry
+                    deduped_pre[idx] = pre
                 break
 
         if not is_duplicate:
             deduped_entries.append(entry)
+            deduped_pre.append(pre)
 
     if len(all_entries) != len(deduped_entries):
         print(f"  [INFO] 重複排除完了: {len(all_entries)} 件 → {len(deduped_entries)} 件")
@@ -655,11 +941,30 @@ def filter_by_category(
 
         # 条件2: スコアが min_score 以上であること
         if score >= min_score:
-            # 配信時にスコア優先抽出するため、entry にスコアを記録
-            entry["_score"] = score
-            filtered.append(entry)
+            # 配信時にスコア優先抽出するため、entry にスコアを記録。
+            # entry は複数チャンネル間で共有される dict なので、直接書き込むと
+            # 後からフィルタした別カテゴリのスコアで上書きされてしまう。
+            # 浅いコピーを作り、そのコピーにのみ _score を持たせる。
+            e2 = dict(entry)
+            e2["_score"] = score
+            filtered.append(e2)
 
     return filtered
+
+
+def filter_by_source_feeds(entries: list[dict], source_feeds: list[str]) -> list[dict]:
+    """
+    エントリを「取得元 RSS フィードの URL」で絞り込みます。
+    Filters entries by the RSS feed URL they were collected from.
+
+    キーワードマッチ（filter_by_category）とは独立した振り分け軸。
+    「Cisco Security Advisories」のように、特定フィード由来の記事を丸ごと
+    専用チャンネルへ送りたい場合に使う。
+    """
+    feeds = {str(u).strip() for u in source_feeds if u}
+    if not feeds:
+        return []
+    return [e for e in entries if e.get("source_feed", "") in feeds]
 
 
 def stratified_pick(entries: list[dict], n: int = 15) -> list[dict]:
@@ -702,6 +1007,109 @@ def stratified_pick(entries: list[dict], n: int = 15) -> list[dict]:
             break
 
     return result
+
+
+def rerank_with_llm(
+    channel_name: str,
+    cat_label: str,
+    entries: list[dict],
+    n: int,
+    api_key: str,
+    model: str,
+) -> list[dict] | None:
+    """
+    LLM（Claude）で候補記事を重要度順に再ランクし、上位 n 件を返します。
+
+    stratified_pick の置き換え（ランダム抽出ではなく内容ベースで選ぶ）。
+    API エラー・パース失敗・空配列時は None を返し、呼び出し側で
+    stratified_pick にフォールバックできるようにする（例外は外に漏らさない）。
+    """
+    if not api_key or not entries:
+        return None
+
+    # 候補カット: スコア降順 → published 降順で上位40件に絞る
+    _epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    candidates = sorted(
+        entries,
+        key=lambda e: (e.get("_score", 0), e.get("published") or _epoch),
+        reverse=True,
+    )[:40]
+
+    # 候補一覧をプロンプト用に整形
+    jst = datetime.timezone(datetime.timedelta(hours=9))
+    lines: list[str] = []
+    for i, e in enumerate(candidates):
+        pub = e.get("published")
+        date_str = pub.astimezone(jst).strftime('%Y-%m-%d %H:%M') if pub else "?"
+        domain = urlparse(e.get("link", "")).netloc
+        summary = (e.get("summary") or "")[:120]
+        lines.append(f"[{i}] {e.get('title', '')} | {summary} | {date_str} JST | {domain}")
+    candidate_block = "\n".join(lines)
+
+    prompt = (
+        "あなたはニュースキュレーターです。以下の読者に向けて、候補記事から重要な記事を選びます。\n"
+        "読者プロフィール: 日本の Cisco Systems の SE（ネットワーク／セキュリティ／AI の実務者）。\n"
+        f"配信チャンネル: {channel_name}\n"
+        f"カテゴリ: {cat_label}\n\n"
+        f"候補一覧（インデックス / タイトル / 概要先頭120字 / 公開日時(JST) / ドメイン）:\n"
+        f"{candidate_block}\n\n"
+        f"重要度順に上位 {n} 件のインデックス番号だけを JSON 配列で出力してください（例: [3,0,12]）。\n"
+        "説明文・コードブロックは禁止。\n"
+        "基準: ①読者の業務への関連度 ②影響の大きさ・新規性 ③同種話題ばかりにならない多様性。"
+    )
+
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "max_tokens": 200,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30, verify=SSL_VERIFY)
+        response.raise_for_status()
+        text = response.json()["content"][0]["text"].strip()
+    except Exception as e:
+        print(f"    [WARN] LLM再ランクのAPI呼び出しに失敗: {e}")
+        return None
+
+    # 応答テキストから最初の JSON 配列を抽出
+    m = re.search(r'\[[\d,\s]*\]', text)
+    if not m:
+        return None
+    try:
+        raw_indices = json.loads(m.group(0))
+    except Exception:
+        return None
+    if not isinstance(raw_indices, list) or not raw_indices:
+        return None
+
+    # 範囲外・重複インデックスを除去
+    picked: list[int] = []
+    seen: set[int] = set()
+    for idx in raw_indices:
+        if isinstance(idx, int) and 0 <= idx < len(candidates) and idx not in seen:
+            picked.append(idx)
+            seen.add(idx)
+
+    if not picked:
+        return None
+
+    # n 件に満たなければ候補のスコア降順（=candidates の並び）から不足分を補完
+    if len(picked) < n:
+        for i in range(len(candidates)):
+            if len(picked) >= n:
+                break
+            if i not in seen:
+                picked.append(i)
+                seen.add(i)
+
+    return [candidates[i] for i in picked[:n]]
 
 
 # ===========================================================
@@ -752,12 +1160,13 @@ def build_and_send(
     for entry in entries:
         pub_jst = entry["published"].astimezone(datetime.timezone(datetime.timedelta(hours=9)))
         fallback_tag = " 📌*最新記事*" if entry.get("fallback") else ""
+        cvss_tag = f"　{entry.get('cvss_color') or '🔺'} CVSS {entry['cvss']}" if entry.get("cvss") else ""
         summary_line = f"  📝 {entry['summary']}\n" if entry.get("summary") else ""
         date_str = pub_jst.strftime('%Y-%m-%d %H:%M')
 
-        # タイトルと日付を同一行に表示（要約は次行）
+        # タイトルと日付を同一行に表示（要約は次行）。Cisco Advisory は CVSS を危険度カラーで併記。
         line = (
-            f"\n- [{entry['title']}]({entry['link']})　（📅 {date_str} JST）{fallback_tag}\n"
+            f"\n- [{entry['title']}]({entry['link']})　（📅 {date_str} JST）{cvss_tag}{fallback_tag}\n"
             f"{summary_line}"
         )
         if len("\n".join(message_parts)) + len(line) > max_chars:
@@ -799,6 +1208,7 @@ def process_channel(
     anthropic_model: str = "claude-3-haiku-20240307",
     morning_message: str = "",
     pre_filtered: list[dict] | None = None,
+    cat_label_override: str | None = None,
 ) -> None:
     """
     1チャンネル分のフィルタリングと送信を処理します。
@@ -806,8 +1216,11 @@ def process_channel(
 
     pre_filtered が指定された場合は再フィルタを行わず、その結果を採用する
     （チャンネル間の再配分処理後にメインから呼ばれる用途）。
+
+    cat_label_override が指定された場合は、ヘッダーのカテゴリ表示に使う。
+    source_feeds 専用チャンネル（categories なし）で「全カテゴリ」と誤表示させない用途。
     """
-    cat_label = "、".join(categories) if categories else "全カテゴリ"
+    cat_label = cat_label_override or ("、".join(categories) if categories else "全カテゴリ")
     print(f"\n  ▶ チャンネル: {channel_name} ({cat_label})")
 
     if pre_filtered is not None:
@@ -820,16 +1233,35 @@ def process_channel(
         from collections import Counter
         score_dist = Counter(e.get("_score", 0) for e in filtered)
         dist_str = " / ".join(f"score={s}:{c}" for s, c in sorted(score_dist.items(), reverse=True))
-        # 高スコア優先で15件に絞る（同階層内のみランダム抽出）
-        filtered = stratified_pick(filtered, 15)
+        # まず LLM 再ランクを試み、失敗（None）時のみ従来の階層化抽出にフォールバック。
+        reranked = None
+        if anthropic_api_key:
+            reranked = rerank_with_llm(
+                channel_name, cat_label, filtered, 15,
+                anthropic_api_key, ANTHROPIC_RERANK_MODEL,
+            )
+        if reranked is not None:
+            filtered = reranked
+            print(f"    LLM再ランク採用 ({ANTHROPIC_RERANK_MODEL})")
+        else:
+            if anthropic_api_key:
+                print("    LLM再ランク失敗 → stratified_pick にフォールバック")
+            # 高スコア優先で15件に絞る（同階層内のみランダム抽出）
+            filtered = stratified_pick(filtered, 15)
         kept_dist = Counter(e.get("_score", 0) for e in filtered)
         kept_str = " / ".join(f"score={s}:{c}" for s, c in sorted(kept_dist.items(), reverse=True))
-        print(f"    15件超 → スコア階層化抽出: {len(filtered)} 件")
+        print(f"    15件超 → 絞り込み後: {len(filtered)} 件")
         print(f"      抽出前 ({sum(score_dist.values())}件): {dist_str}")
         print(f"      抽出後 ({sum(kept_dist.values())}件): {kept_str}")
+    else:
+        print(f"    15件以下（再ランク不要）: {len(filtered)} 件")
 
     filtered.sort(key=lambda x: x["published"], reverse=True)
-    
+
+    # Cisco Security Advisory は CVSS スコアを取得して付与（要約より前に実行）。
+    # 非 advisory エントリはネットワーク取得を行わないため他チャンネルには無影響。
+    enrich_cisco_cvss_in_place(filtered)
+
     # Claudeによる要約を実行 (APIキーが設定されている場合のみ)
     if anthropic_api_key and summarize_cache is not None:
         summarize_entries_in_place(filtered, anthropic_api_key, summarize_cache, model=anthropic_model)
@@ -843,15 +1275,9 @@ def process_channel(
     )
 
     if not filtered:
-        msg = (
-            f"📭 **{channel_name}**\n"
-            f"過去 {hours_ago} 時間以内に **{cat_label}** に該当するニュースはありませんでした。\n"
-            f"⏱ {now_jst.strftime('%Y-%m-%d %H:%M')} JST"
-        )
-        if dry_run:
-            print(f"    {msg}")
-        else:
-            send_webex_message(space_id, msg, bot_token)
+        # 当日に該当ニュースが無いスペースには、空通知も含め一切投稿しない。
+        # （以前は「該当ニュースはありませんでした」と投稿していたが、これを廃止）
+        print(f"    該当ニュース 0 件 → {channel_name} には投稿しません（スキップ）")
         return
 
     if dry_run:
@@ -860,9 +1286,10 @@ def process_channel(
         for e in filtered:
             pub_jst = e["published"].astimezone(datetime.timezone(datetime.timedelta(hours=9)))
             fb = " [📌最新記事]" if e.get("fallback") else ""
+            cvss_tag = f"　{e.get('cvss_color') or '🔺'} CVSS {e['cvss']}" if e.get("cvss") else ""
             date_str = pub_jst.strftime('%Y-%m-%d %H:%M')
-            # タイトルと日付を同一行
-            print(f"  - {e['title']}　（📅 {date_str} JST）{fb}")
+            # タイトルと日付を同一行（Cisco Advisory は CVSS を危険度カラーで併記）
+            print(f"  - {e['title']}　（📅 {date_str} JST）{cvss_tag}{fb}")
             if e.get("summary"):
                 print(f"    📝 {e['summary']}")
             print(f"    🔗 {e['link']}")
@@ -919,11 +1346,30 @@ def main() -> None:
 
     # カスタムファイルパスが指定された場合は再読み込み
     rss_urls = load_urls(args.urls_file)
+    url_groups = load_url_groups(args.urls_file)
     if args.categories_file != CATEGORIES_FILE:
         category_keywords = load_categories(args.categories_file)
     if args.bots_file != BOTS_FILE:
         channels = load_bots(args.bots_file)
         multi_mode = len(channels) > 0
+
+    # bots.yml の source_groups（urls.yml のグループ名参照）を実URLへ解決し、
+    # チャンネルの source_feeds に反映する。URL の正本は urls.yml 側に一本化され、
+    # bots.yml にはグループ名だけを書けばよい。
+    for ch in channels:
+        groups = ch.get("source_groups") or []
+        if not groups:
+            continue
+        resolved: list[str] = []
+        for g in groups:
+            g = str(g).strip()
+            urls = url_groups.get(g)
+            if not urls:
+                print(f"  [WARN] bots.yml channel ({ch.get('name','?')}): source_groups の '{g}' が urls.yml に見つかりません")
+                continue
+            resolved.extend(urls)
+        existing = ch.get("source_feeds") or []
+        ch["source_feeds"] = list(dict.fromkeys(existing + resolved))
 
     # シングルボットモードの事前チェック
     if not multi_mode and not WEBEX_BOT_TOKEN:
@@ -955,9 +1401,27 @@ def main() -> None:
     print(f"  Dry-run     : {args.dry_run}")
     print()
 
+    # 収集対象URLの確定。
+    # urls.yml（全チャンネル共通）に加えて、各チャンネルの source_feeds も収集する。
+    # → source_feeds のフィードは urls.yml に重複して書く必要がない。
+    #   専用フィード（例: Cisco Security Advisories）はチャンネル定義に一元化できる。
+    collect_urls = list(rss_urls)
+    if multi_mode:
+        seen = set(collect_urls)
+        added = 0
+        for ch in active_channels:
+            for u in (ch.get("source_feeds") or []):
+                u = str(u).strip()
+                if u and u not in seen:
+                    collect_urls.append(u)
+                    seen.add(u)
+                    added += 1
+        if added:
+            print(f"  [INFO] source_feeds から {added} 件のフィードを収集対象に追加（urls.yml 外）")
+
     # RSS 収集（1回だけ）/ Collect RSS once
     print("--- RSS 収集 ---")
-    all_entries = collect_all_entries(rss_urls, args.hours, args.fallback_items)
+    all_entries = collect_all_entries(collect_urls, args.hours, args.fallback_items)
     print(f"\n  合計 {len(all_entries)} 件取得\n")
 
     # ===== マルチチャンネルモード =====
@@ -966,13 +1430,66 @@ def main() -> None:
 
         # Phase 1: 全チャンネルを事前フィルタして件数を把握
         # Phase 1: pre-filter every channel so we know each channel's pre-sample size.
+        #
+        # 振り分け軸は2つ:
+        #   - categories : 記事本文のキーワードマッチ（従来）
+        #   - source_feeds: 取得元 RSS フィード URL によるマッチ（新規）
+        # source_feeds を持つチャンネルは、そのフィード由来の記事を対象にする。
+        # categories も併記されていれば、両者の和集合を対象にする。
         channel_filtered: dict[str, list[dict]] = {}
         for ch in active_channels:
             ch_name = ch.get("name", "Unnamed")
             cats = ch.get("categories") or []
-            channel_filtered[ch_name] = filter_by_category(
-                all_entries, cats if cats else None, category_keywords
-            )
+            src_feeds = ch.get("source_feeds") or []
+            if src_feeds:
+                matched = filter_by_source_feeds(all_entries, src_feeds)
+                if cats:
+                    # filter_by_category は entry の浅いコピーを返すため id() では
+                    # 一致判定できない。link ベースで重複排除する。
+                    seen = {e.get("link") for e in matched}
+                    matched = matched + [
+                        e for e in filter_by_category(all_entries, cats, category_keywords)
+                        if e.get("link") not in seen
+                    ]
+                channel_filtered[ch_name] = matched
+            else:
+                channel_filtered[ch_name] = filter_by_category(
+                    all_entries, cats if cats else None, category_keywords
+                )
+
+        # Phase 1.4: 「source_feeds 専有配信」
+        # source_feeds を持つチャンネルは、そのフィード由来の記事を専有する。
+        # 対象記事の link を他の全チャンネル（priority チャンネル含む）から除外し、
+        # その専用チャンネルでのみ配信する。
+        # 用途: Cisco Security Advisories を専用スペースへ隔離し、
+        #       セキュリティ/Cisco 等の一般チャンネルへの重複投稿を止める。
+        source_feed_channel_names = [
+            ch.get("name", "Unnamed") for ch in active_channels if ch.get("source_feeds")
+        ]
+        source_claimed_links: set[str] = set()
+        for sname in source_feed_channel_names:
+            for e in channel_filtered.get(sname, []):
+                link = e.get("link") or ""
+                if link:
+                    source_claimed_links.add(link)
+
+        source_exclusive_log: list[tuple[str, int, int]] = []
+        if source_claimed_links:
+            for name, ents in list(channel_filtered.items()):
+                if name in source_feed_channel_names:
+                    continue  # 専有チャンネル自身からは除外しない
+                before = len(ents)
+                channel_filtered[name] = [
+                    e for e in ents if (e.get("link") or "") not in source_claimed_links
+                ]
+                after = len(channel_filtered[name])
+                if before != after:
+                    source_exclusive_log.append((name, before, after))
+
+        if source_exclusive_log:
+            print(f"--- source_feeds 専有配信（{', '.join(source_feed_channel_names)}）---")
+            for name, before, after in source_exclusive_log:
+                print(f"  ▷ {name}: {before} 件 → {after} 件（{before - after} 件を専用チャンネルへ）")
 
         # Phase 1.5: 「優先チャンネル独占配信」
         # bots.yml で priority: true が指定されたチャンネルは、そのチャンネルにマッチする
@@ -1078,10 +1595,23 @@ def main() -> None:
             space_id   = ch.get("webex_space_id", "")
             bot_token  = ch.get("webex_bot_token", "") or WEBEX_BOT_TOKEN
             categories = ch.get("categories") or []  # 空リスト = 全カテゴリ
+            src_feeds  = ch.get("source_feeds") or []
+
+            # 環境変数が未解決のチャンネルはスキップ（トークン後日用意の運用に対応）
+            if ch.get("_skip_reason") or not space_id:
+                reason = ch.get("_skip_reason") or "webex_space_id が未設定"
+                print(f"  [SKIP] {ch_name}: {reason}")
+                continue
 
             if not bot_token:
                 print(f"  [SKIP] {ch_name}: bot_token が未設定です (.env の WEBEX_BOT_TOKEN または bots.yml の webex_bot_token を設定してください)")
                 continue
+
+            # ラベル: source_feeds 専用（categories なし）のチャンネルは
+            # 「全カテゴリ」ではなく RSS 専用配信であることを明示する。
+            cat_label_override = None
+            if src_feeds and not categories:
+                cat_label_override = "Cisco Security Advisories（RSS 専用）"
 
             process_channel(
                 channel_name=ch_name,
@@ -1098,6 +1628,7 @@ def main() -> None:
                 anthropic_model=ANTHROPIC_MODEL,
                 morning_message=morning_message,
                 pre_filtered=channel_filtered.get(ch_name),
+                cat_label_override=cat_label_override,
             )
             time.sleep(1)  # チャンネル間のレート制限
 

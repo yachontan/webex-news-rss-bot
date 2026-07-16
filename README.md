@@ -1,16 +1,16 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v1.0.4-blue)
-![Release Date](https://img.shields.io/badge/release-2026--06--03-green)
+![Version](https://img.shields.io/badge/version-v1.1.0-blue)
+![Release Date](https://img.shields.io/badge/release-2026--07--13-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v1.0.4` ／ **Release Date**: 2026-06-11
+**Version**: `v1.1.0` ／ **Release Date**: 2026-07-13
 
-> **RSS → Webex Bot ニュース通知 ＆ LLM自動要約スクリプト / RSS-to-Webex News Notifier with LLM Summary**
+> **RSS → Webex Bot ニュース通知 ＆ LLM自動要約・再ランクスクリプト / RSS-to-Webex News Notifier with LLM Summary & Re-ranking**
 
-カテゴリキーワードに基づいて当日のRSSニュースを収集し、重複排除やClaudeによる自動要約を行った上で、Webex Bot経由で複数の指定スペースに自動配信する高機能ニュース通知スクリプトです。  
-A Python script that collects today's RSS news, deduplicates, automatically summarizes using Claude API (LLM), and notifies Webex spaces via Bot.
+カテゴリキーワードに基づいて当日のRSSニュースを並列収集し、重複排除・Claudeによる重要度再ランク・自動要約を行った上で、Webex Bot経由で複数の指定スペースに自動配信する高機能ニュース通知スクリプトです。  
+A Python script that collects today's RSS news in parallel, deduplicates, re-ranks by importance and summarizes using Claude API (LLM), and notifies Webex spaces via Bot.
 
 > **カテゴリ設定は `categories.yml`、フィードリストは `urls.yml`、配信先は `bots.yml` で完全外部管理。Pythonコードを一切書き換えることなく、運用のすべてをカスタマイズできます。**  
 > **Completely managed via YAML configs (`categories.yml`, `urls.yml`, `bots.yml`). You can fully customize feeds, filters, and routing without editing any Python script.**
@@ -27,11 +27,13 @@ A Python script that collects today's RSS news, deduplicates, automatically summ
 - [各種設定ファイル / Configuration Files](#各種設定ファイル--configuration-files)
 - [プライベートカテゴリ運用（my-fab パターン）/ Private Category Usage](#プライベートカテゴリ運用my-fab-パターン-private-category-usage)
 - [Claudeによる自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode](#claudeによる自動要約--超エコノミーモード--llm-summarization--eco-mode)
+- [LLMによるニュース選出（再ランク）/ LLM Re-ranking](#llmによるニュース選出再ランク--llm-re-ranking)
 - [自動実行 / Automation (cron)](#自動実行--automation-cron)
 - [macOS の制限と設計上の理由 / macOS Restrictions & Design Rationale](#macos-の制限と設計上の理由--macos-restrictions--design-rationale)
 - [Windows での利用 / Running on Windows](#windows-での利用--running-on-windows)
 - [ファイル構成 / File Structure](#ファイル構成--file-structure)
 - [トラブルシューティング / Troubleshooting](#トラブルシューティング--troubleshooting)
+- [更新履歴 / Version History](#更新履歴--version-history)
 
 ---
 
@@ -39,7 +41,7 @@ A Python script that collects today's RSS news, deduplicates, automatically summ
 
 | 機能 | 用途・詳細 | Description |
 |:---|:---|:---|
-| **複数RSSの一括取得** | `urls.yml` に登録したフィードを順次取得（フィード間 1秒sleep） | Sequential fetching from ~170 feeds |
+| **複数RSSの並列取得** | `urls.yml` の約170フィードを **ホスト別に最大12並列** で取得（同一ホスト内はリクエスト間1秒sleepの直列＝サーバへの礼儀は維持）。全体実行時間を大幅短縮 | Parallel fetching (up to 12 host-workers; per-host 1s throttle) |
 | **スコアリング型カテゴリフィルタ** | `categories.yml` に定義したキーワードを **必須語(`!`)×3点 + 通常語×1点** でスコア計算、`>=4点`で合格 | Weighted keyword scoring (must×3 + normal×1, threshold 4) |
 | **単語境界マッチ** | 5文字以下の英数字キーワードは `\b` で境界判定（`lan`は `LAN`にマッチするが`plan`にはマッチしない） | Word-boundary regex for short ASCII keywords |
 | **Cisco限定URL深度マッチ** | URLに `cisco` を含む記事のみ URL文字列を判定対象に追加（Google News等の汎用URLによる誤マッチを防止） | URL inclusion limited to cisco domains |
@@ -47,9 +49,13 @@ A Python script that collects today's RSS news, deduplicates, automatically summ
 | **優先独占チャンネル** | `priority: true` のチャンネル（Cisco等）は該当記事を他チャンネルから除外して独占配信 | Priority channel claims its articles exclusively |
 | **チャンネル間譲渡 (defers_to)** | 汎用チャンネル（AI・機械学習・世の中 等）から専門チャンネル（セキュリティ/ネットワーク/経済）へ自動譲渡 | Auto-defer articles to more specific channels |
 | **ニッチ優先再配分** | 15件超の混雑チャンネルから、同じ記事が15件以下の余裕チャンネルにも該当する場合、余裕側のみに残して混雑側から除外 | Crowded→spacious redistribution |
-| **高度な重複排除** | 媒体名(`(共同通信)`等)除去後、①タイトル類似度85%以上、②漢字bigram Jaccard 20%以上、③漢字bigram Overlap 50%以上+共通5件以上、④タイトル55%+概要55% のいずれかで統合し **最新公開日時の記事を採用** | Hybrid 4-way dedup with kanji-bigram Jaccard/Overlap for Japanese; keeps the most recent |
+| **ソースベース振り分け (source_groups)** | 記事本文のキーワードではなく「どの RSS フィード由来か」でチャンネルを決定。`urls.yml` の名前付きグループを `bots.yml` の `source_groups` で参照し、そのフィード由来の記事を専有配信（例: Cisco Security Advisories を専用スペースへ隔離） | Route by source feed via named `urls.yml` groups |
+| **Cisco Advisory の CVSS 併記（危険度カラー）** | Cisco Security Advisory の記事に、Cisco 公開の構造化データ（CVRF）から取得した実際の **CVSS Base Score** を、深刻度に応じた色付きバッジで表示（🔴 Critical / 🟠 High / 🟡 Medium・Low）。複数スコアは範囲表記＋最大値で色付け（`🔴 CVSS 7.5〜9.1（複数該当）`）。LLM には推測させず実値を取得 | Color-coded CVSS badge for Cisco advisories (fetched from CVRF) |
+| **空チャンネルは無投稿** | 当日に該当ニュースが0件のスペースには、空通知も含め一切投稿しない | Skip posting entirely when a channel has no matching news |
+| **高度な重複排除** | 媒体名(`(共同通信)`等)除去後、①タイトル類似度85%以上、②漢字bigram Jaccard 20%以上、③漢字bigram Overlap 50%以上+共通5件以上、④タイトル55%+概要55%、⑤**英語タイトルの単語Jaccard 50%以上（両者4語以上）** のいずれかで統合し **最新公開日時の記事を採用**。正規化・bigram・トークン集合は前計算済みで高速 | Hybrid 5-way dedup: kanji-bigram for Japanese + word-level Jaccard for English; precomputed for speed |
+| **LLM再ランク（ニュース選出）** | 1チャンネル15件超のとき、スコア上位40候補を Claude が**読者（Cisco SE）にとっての重要度順**に15件選定。API未設定・失敗時はスコア階層＋ランダム抽出に自動フォールバック | LLM re-ranking picks top 15 by reader relevance; falls back to stratified random sampling |
 | **SSLフォールバック** | SSL証明書検証失敗時に自動で `verify=False` リトライ（HuggingFace等のmacOS証明書問題に対応） | Auto-fallback to `verify=False` on SSL failure |
-| **フィードリーダ系User-Agent** | `rss-bot/1.0` UAでCISA・community.cisco.com等のbot対策サイトに対応 | Feed-reader UA bypasses anti-bot blocks |
+| **フィードリーダ系User-Agent** | `rss-bot/1.0` UAでCISA等のbot対策サイトに対応（※community.cisco.com は2026-07現在それでも403 → トラブルシューティング参照） | Feed-reader UA mitigates anti-bot blocks (some sites still reject) |
 | **Markdownリンク形式** | タイトルと日付を同一行に表示 (`[Title](URL)　（📅 date JST）`) | Title and date on same line with Markdown link |
 | **Claude自動要約** | Claude APIで「自然な日本語1〜2文（110字以内）」に要約。**英文RSSは自動で日本語に翻訳** | LLM summary + English→Japanese translation |
 | **超エコノミーモード** | プロンプト圧縮（~22トークン）+ 短い綺麗な日本語概要のスキップ + 要約キャッシュ | Compressed prompt (~22 tokens), skip for short Japanese, in-memory cache |
@@ -99,8 +105,9 @@ Open `.env` and fill in your actual values. All variables with descriptions are 
 | `WEBEX_SPACE_ID` | ✅ | 送信先 Webex スペース ID（シングルボットモード） |
 | `WEBEX_SPACE_ID_*` | — | マルチチャンネルモード用 Space ID（`bots.yml` で参照） |
 | `WEBEX_BOT_TOKEN_*` | — | チャンネル別 Bot トークン（省略時は共通トークンを使用） |
-| `ANTHROPIC_API_KEY` | — | Claude API キー（要約機能を使う場合のみ） |
-| `ANTHROPIC_MODEL` | — | 使用するモデル名（デフォルト: `claude-haiku-4-5-20251001`） |
+| `ANTHROPIC_API_KEY` | — | Claude API キー（要約・再ランク機能を使う場合のみ） |
+| `ANTHROPIC_MODEL` | — | **要約**用モデル名（コード既定: `claude-3-haiku-20240307`。`.env` で新しいモデルに上書き推奨） |
+| `ANTHROPIC_RERANK_MODEL` | — | **再ランク**用モデル名（既定: `claude-haiku-4-5-20251001`） |
 | `SSL_VERIFY` | — | `false` にすると SSL 検証を無効化（社内プロキシ等） |
 | `MYFAB_KEYWORD` 等 | — | プライベートカテゴリ用（my-fab パターン参照） |
 
@@ -186,11 +193,12 @@ channels:
 
 | Phase | 内容 |
 |:---:|:---|
-| **1. 事前フィルタ** | 各チャンネルの該当記事を抽出 |
+| **1. 事前フィルタ** | 各チャンネルの該当記事を抽出（キーワード + `source_groups`/`source_feeds`） |
+| **1.4. source 専有** | `source_groups`/`source_feeds` を持つチャンネルは、そのフィード由来の記事を専有し、他の全チャンネル（`priority` 含む）から除外（例: Cisco Security Advisories を専用スペースへ隔離） |
 | **1.5. 優先独占** | `priority: true` のチャンネルにマッチした記事を、他チャンネルから自動除外（例: Cisco記事は Cisco チャンネルでのみ配信） |
 | **1.6. 譲渡 (defers_to)** | `defers_to: [...]` のチャンネルは、指定された譲渡先チャンネルにも該当する記事を譲渡先のみに残し、自分の側から除外（例: AI・機械学習はセキュリティ／ネットワーク寄りの記事を譲る） |
 | **2. ニッチ優先** | 15件超の混雑チャンネルから、同じ記事が15件以下の余裕チャンネルにも該当する場合、余裕側のみに残して混雑側から除外 |
-| **3. ランダム抽出** | それでも15件を超えるチャンネルでは、最終的にランダム抽出で15件に圧縮 |
+| **3. LLM再ランク** | それでも15件を超えるチャンネルでは、Claude がスコア上位40候補から**重要度順に15件を選定**（API未設定・失敗時はスコア階層＋階層内ランダム抽出にフォールバック）。詳細は[LLMによるニュース選出](#llmによるニュース選出再ランク--llm-re-ranking)参照 |
 
 **`priority: true`**: Cisco のような専門カテゴリ向け。該当記事を独占的に配信。  
 **`defers_to: [チャンネル名]`**: AI・機械学習のような汎用カテゴリで、より専門的なチャンネル（セキュリティ・ネットワーク等）にも該当する場合、そちらに譲るための設定。
@@ -203,6 +211,58 @@ channels:
   categories:
     - AI・機械学習
 ```
+
+#### ソースベース振り分けと Cisco Security Advisories / Source-based routing & CVSS
+
+記事本文のキーワードではなく **「どの RSS フィード由来か」** でチャンネルを決めたい場合は、`urls.yml` に名前付きグループを定義し、`bots.yml` の `source_groups` で参照します。URL の正本は `urls.yml` 側に一本化され、`bots.yml` にはグループ名だけを書きます。
+
+```yaml
+# urls.yml — フィードの正本（グループにまとめる）
+- group: cisco-advisory
+  urls:
+    - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
+```
+
+```yaml
+# bots.yml — グループ名だけを参照（URL は書かない）
+- name: "News Today : Cisco Security Advisories"
+  webex_space_id: ${WEBEX_SPACE_ID_CISCO_ADVISORY}
+  webex_bot_token: ${WEBEX_BOT_TOKEN_CISCO_ADVISORY}
+  priority: true
+  source_groups:
+    - cisco-advisory   # urls.yml の group を参照
+  categories: []       # キーワード分類はせず、このグループ由来のみ配信
+```
+
+- `source_groups` のフィードは `urls.yml` に定義されていれば自動で収集対象になります（別途 `urls.yml` の平文リストに重複して書く必要はありません）。
+- グループ由来の記事は Phase 1.4 で他の全チャンネルから除外され、この専用スペースにのみ配信されます（セキュリティ等への重複投稿を停止）。
+- `webex_space_id` / `webex_bot_token` の環境変数が未設定（未解決）の間、そのチャンネルは自動的にスキップされます（トークンを後から用意する運用に対応）。
+- URL を直接書きたい場合は `source_groups` の代わりに `source_feeds:`（URL のリスト）も使えます。
+
+**CVSS スコアの併記（危険度カラー） / Color-coded CVSS badge** — Cisco Security Advisory の記事には、Cisco 公開の構造化データ（advisory ごとの **CVRF XML**）から取得した実際の **CVSS Base Score** を、深刻度に応じた色付きバッジでタイトル行に表示します。
+
+色は標準的な CVSS v3.x の深刻度バンドに対応します。
+
+| CVSS Base Score | 深刻度 / Severity | 色 |
+|:---:|:---|:---:|
+| 9.0 – 10.0 | Critical | 🔴 |
+| 7.0 – 8.9 | High | 🟠 |
+| 0.1 – 6.9 | Medium / Low | 🟡 |
+
+| ケース | 表示例 |
+|:---|:---|
+| 単一スコア（High） | `🟠 CVSS 7.8` |
+| 単一スコア（Medium/Low） | `🟡 CVSS 5.5` |
+| 複数スコア（複数 CVE） | `🔴 CVSS 7.5〜9.1（複数該当）`（最小〜最大） |
+| スコアなし（事前通知等） | バッジなし |
+
+> 複数スコアがある場合、**色は最大値（最悪ケース）** で決定します（例: `7.5〜9.1` は最大 9.1 が Critical のため 🔴）。
+
+> CVSS は RSS 本文には含まれないため、LLM には推測させず CVRF から実値を取得します。**要約プロンプトでは CVSS を問い合わせません**（課金削減）。それでも LLM が概要文から CVSS を拾って要約に含めることがあるため、要約後に CVSS 表記を自動除去し、バッジとの二重表示を防ぎます。
+>
+> なお advisory の記事は、**深刻度に見合う影響（攻撃前提・想定被害）を簡潔にまとめる専用の要約プロンプト**を使います（深刻度はモデルが本文から推測。CVSS 数値はバッジ側で表示）。一般ニュース等は従来どおりの汎用要約プロンプトです。
+
+**空チャンネルは無投稿 / Skip when empty** — 当日に該当ニュースが 0 件のスペースには、空通知も含め一切投稿しません。
 
 ### 2. キーワード設定 (`categories.yml`) / Category keywords
 記事のタイトル・概要・タグ・**URL（リンク）** からカテゴリを判定するためのキーワードを定義します。  
@@ -269,6 +329,8 @@ An article **passes** a category (and is delivered) when **all** of the followin
   **Don't forget plural variants.** `!vulnerability` does not match "vulnerabilities". Register plurals such as `!vulnerabilities`, `!exploits`, `!breaches`, or use a stem like `!vulnerabilit`.
 - **広いカテゴリ（一般・経済等）には `!` 付き語を多めに設定** すると、雑多なRSSからのノイズを排除しやすくなります。  
   Broad categories (general news, economy, etc.) benefit from many `!` must-keywords to suppress noise.
+- **トレンド語（時事の固有名詞）は陳腐化前提で定期見直し**: `categories.yml` の「── トレンド語」ブロックにコメントで最終見直し日を記録する運用にしています（最終見直し: 2026-07-13）。政権交代・紛争の終結などがあったら更新してください。  
+  **Trend keywords (current-events proper nouns) rot.** Record the last-review date as a comment in the trend block and refresh periodically (last review: 2026-07-13).
 - **`min_score` を変更したい場合** は [webex-news-rss-bot.py](webex-news-rss-bot.py) の `filter_by_category(..., min_score=4)` のデフォルト値を調整します。値を下げると緩く、上げると厳しくなります。  
   To change `min_score`, edit the default in `filter_by_category(..., min_score=4)`. Lower = lax, higher = strict.
 
@@ -288,13 +350,20 @@ Approximate size of each category in this repository's `categories.yml`:
 | Cisco | 42 | 108 | Cisco固有ブランド + compound必須語 |
 
 ### 3. RSSフィード設定 (`urls.yml`) / RSS feed list
-ニュースの収集元となるRSSフィードURLの一覧を管理します。  
-Lists the RSS feed URLs to collect articles from.
+ニュースの収集元となるRSSフィードURLの一覧を管理します。各要素は **文字列（通常のURL）** または **名前付きグループ** のどちらでも記述できます。  
+Lists the RSS feed URLs to collect articles from. Each item is either a plain URL string or a named group.
 ```yaml
+# 通常のフィード（文字列）
 - https://blogs.cisco.com/feed
 - https://zenn.dev/topics/aiagent/feed
 - https://b.hatena.ne.jp/search/tag?q=AI&mode=rss
+
+# 名前付きグループ（bots.yml の source_groups から参照）
+- group: cisco-advisory
+  urls:
+    - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
 ```
+> グループは、特定フィード由来の記事を専用チャンネルへ振り分けるための仕組みです。詳細は[ソースベース振り分けと Cisco Security Advisories](#ソースベース振り分けと-cisco-security-advisories--source-based-routing--cvss)を参照。
 
 ### 4. 朝メッセージ署名設定 (`morning_messages.txt`) / Morning footer phrases
 配信メッセージの末尾にランダムで追加される署名フレーズを1行ずつ記述して管理します。  
@@ -497,6 +566,31 @@ Claude responses are hard-capped at **`max_tokens = 140`** to prevent runaway ou
 
 ---
 
+## LLMによるニュース選出（再ランク） / LLM Re-ranking
+
+1チャンネルの配信上限は15件です。キーワードスコアリング合格後も15件を超えるチャンネル（AI・一般など混雑カテゴリ）では、**Claude が最終選出**を行います。  
+Each channel delivers at most 15 articles. When more than 15 candidates pass keyword scoring, **Claude makes the final pick**.
+
+### 仕組み / How it works
+
+1. 合格記事を **スコア降順 → 公開日時降順** で並べ、上位 **40件** に絞る（トークン節約）
+2. 各候補の「タイトル / 概要先頭120字 / 公開日時(JST) / ソースドメイン」を1コールで Claude（`ANTHROPIC_RERANK_MODEL`）に渡す
+3. 読者プロフィール（**日本の Cisco Systems SE：ネットワーク/セキュリティ/AI の実務者**）を基準に、①業務への関連度 ②影響の大きさ・新規性 ③話題の多様性 で重要度順に15件のインデックスを JSON で返させる
+4. 応答のパースに失敗・API エラー時は、従来の **スコア階層化抽出（同一スコア帯内のみランダム）** に自動フォールバック
+
+ログで採否を確認できます / Check adoption in the run log:
+```
+LLM再ランク採用 (claude-haiku-4-5-20251001)        ← 再ランクが機能
+LLM再ランク失敗 → stratified_pick にフォールバック   ← フォールバック発動
+15件以下（再ランク不要）                            ← そもそも枠内
+```
+
+### コスト / Cost
+再ランクは **15件超のチャンネルにつき1コール**（max_tokens=200）のみ。要約のエコノミーモードと合わせても、1日あたりの追加コストは Haiku 数コール分に収まります。  
+Re-ranking costs a single API call (max_tokens=200) per over-limit channel — a few Haiku calls per day at most.
+
+---
+
 ## 自動実行 / Automation (cron / launchd)
 
 定期的にスクリプトを自動実行し、Webexに最新ニュースを流すには、OSに合わせてスケジュール実行を設定します。
@@ -504,7 +598,11 @@ Claude responses are hard-capped at **`max_tokens = 140`** to prevent runaway ou
 
 ### macOS の場合: launchd (推奨)
 
-macOSのセキュリティ機能により、`Documents` や `Desktop` などの保護されたフォルダ内ではバックグラウンド実行がブロックされてしまう場合があります。そのため、ホームディレクトリ直下 (`~/rss-bot`) に専用の実行環境を構築・同期するデプロイスクリプトを用意しています。
+> **✅ 推奨構成（v1.1.0〜）: TCC 保護外のパスにリポジトリを置いて直接実行**  
+> リポジトリを `~/Developer/rss-bot` のような **TCC 保護対象外のフォルダ**に置く場合、コピーデプロイは不要です。launchd の plist からこのリポジトリの `run_rssbot.sh` を直接指定してください（`run_rssbot.sh` は自身の場所を基準に動作します）。ログはリポジトリ内 `log/` にタイムスタンプ付きで出力されます。  
+> If the repo lives outside TCC-protected folders (e.g. `~/Developer/rss-bot`), point launchd directly at `run_rssbot.sh` — no copy-deploy needed.
+
+以下は、リポジトリが `~/Documents` など **TCC 保護下にある場合**の従来方式です。macOSのセキュリティ機能により、`Documents` や `Desktop` などの保護されたフォルダ内ではバックグラウンド実行がブロックされてしまう場合があります。そのため、ホームディレクトリ直下 (`~/rss-bot`) に専用の実行環境を構築・同期するデプロイスクリプトを用意しています。
 
 **デプロイスクリプトの実行**
 初めてセットアップする際、およびソースコードや設定ファイル（`bots.yml`等）を更新した後は、ターミナルで以下のスクリプトを実行してください。
@@ -788,9 +886,23 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 ---
 
+## 更新履歴 / Version History
+
+| Version | 日付 / Date | 主な変更 / Changes |
+|:---|:---|:---|
+| **v1.1.0** | 2026-07-13 | **ニュース選出と性能の大型アップデート / Selection & performance overhaul**<br>・**LLM再ランク導入**: 15件超のチャンネルは Claude が重要度順に15件を選定（従来のランダム抽出を置換。失敗時は自動フォールバック）。env `ANTHROPIC_RERANK_MODEL` 追加<br>・**フィード取得の並列化**: ホスト別に最大12並列（同一ホストは1秒間隔を維持）で実行時間を大幅短縮<br>・**重複排除の強化**: 英語タイトルの単語Jaccard判定（⑤）を追加、正規化・bigramの前計算で高速化<br>・**バグ修正**: `_score` が複数チャンネル間で上書きされる問題を修正（チャンネル別に独立スコア化）<br>・**ソースベース振り分け**: `source_groups` / `source_feeds` で特定RSSフィード由来の記事を専用チャンネルへ専有配信（Cisco Security Advisories 分離用）。URL正本は `urls.yml` のグループ定義に一元化<br>・`check_rooms.py` 関数化＋`--find` オプション追加<br>・トレンド語の定期見直し（2026-07-13: ガザ/スーダン/主要語の英語版を追加）<br>・README: TCC保護外パス（例 `~/Developer`）での直接実行を推奨構成として明記 |
+| v1.0.4 | 2026-06-11 | launchd 実行ログをラッパースクリプト経由の**タイムスタンプ付きファイル**に変更（実行ごとに `log/launchd_run-YYYYMMDD-HHMMSS.log` を生成） |
+| v1.0.3 | 2026-06-03 | README に **macOS の制限と設計上の理由**（launchd/TCC）および **Windows での利用**（タスクスケジューラ）セクションを追加 |
+| v1.0.2 | 2026-06-03 | `.env.example` を全変数のドキュメント付きに拡充 |
+| v1.0.1 | 2026-06-03 | MIT LICENSE を追加 |
+| v1.0.0 | 2026-06-03 | 初版リリース: RSS並行収集・スコアリング型カテゴリフィルタ・マルチチャンネル配信（priority/defers_to/ニッチ優先再配分）・漢字bigramハイブリッド重複排除・Claude自動要約（超エコノミーモード）・プライベートカテゴリ運用（my-fabパターン）・launchdデプロイ |
+
+---
+
 ### ❌ CISA や community.cisco.com が 403 になる
-* 以前のバージョンではブラウザ風UA（Mozilla/Chrome）を使っており、これらのbot保護サイトで403が出ていました。
-* 現バージョンは `rss-bot/1.0` という **フィードリーダ系UA** を採用しており、ほぼ全てのサイトで200が返ります。古いバージョンを使っている場合はアップデートしてください。
+* 以前のバージョンではブラウザ風UA（Mozilla/Chrome）を使っており、これらのbot保護サイトで403が出ていました。現バージョンは `rss-bot/1.0` という **フィードリーダ系UA** を採用しており、多くのサイトで改善します。
+* ただし **2026-07 現在、community.cisco.com はフィードリーダ系UAでも403を返す**ことが確認されています（サイト側のbot対策強化）。該当フィードのエラーはスクリプト内で握りつぶされ、他のフィードの収集は継続します。恒久対応（フィードの代替URL化・削除）は検討中です。
+  As of 2026-07, community.cisco.com rejects even feed-reader UAs (403). These per-feed errors are caught and do not stop the run.
 
 ---
 

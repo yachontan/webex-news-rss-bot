@@ -26,7 +26,22 @@ channels:
       - ネットワーク
       - Cisco
 
-  # チャンネル 3: すべてのカテゴリを配信するダイジェスト
+  # チャンネル 3: 取得元 RSS フィードで振り分ける専用スペース（source_groups）
+  #   categories（記事本文キーワード）ではなく「どのフィード由来か」で振り分ける。
+  #   フィードURLは urls.yml の group: <名前> に定義し、ここでは名前だけを参照する
+  #   （bots.yml に URL を書かない＝URL の正本は urls.yml に一本化）。
+  #   指定グループ由来の記事はこのチャンネルが専有し、他チャンネルから除外される。
+  #   例: Cisco Security Advisories を専用スペースへ隔離し、セキュリティ等への重複投稿を止める。
+  #   webex_space_id / webex_bot_token が未設定（環境変数未解決）の間は自動でスキップされる。
+  # - name: "News Today : Cisco Security Advisories"
+  #   webex_space_id: ${WEBEX_SPACE_ID_CISCO_ADVISORY}
+  #   webex_bot_token: ${WEBEX_BOT_TOKEN_CISCO_ADVISORY}
+  #   priority: true
+  #   source_groups:
+  #     - cisco-advisory   # urls.yml の group: cisco-advisory を参照
+  #   categories: []       # source_groups のみで振り分け
+
+  # チャンネル 4: すべてのカテゴリを配信するダイジェスト
   # - name: 全カテゴリダイジェスト
   #   webex_space_id: ${WEBEX_SPACE_ID_DIGEST}
   #   categories: []   # 空 = 全カテゴリ
