@@ -1332,6 +1332,9 @@ def main() -> None:
         )
     parser.add_argument("--hours", "-t", type=int, default=24,
                         help="取得期間（時間）デフォルト: 24")
+    parser.add_argument("--weekend-catchup", action="store_true",
+                        help="月曜の実行時のみ、取得期間を72時間（金土日の3日分）に自動拡張する。"
+                             "平日9時運用で週末の未配信分をキャッチアップする用途。")
     parser.add_argument("--dry-run", action="store_true",
                         help="Webexに送信せず、収集結果をターミナルに表示するのみ")
     parser.add_argument("--fallback-items", type=int, default=3, metavar="N",
@@ -1384,6 +1387,14 @@ def main() -> None:
     mode_label = "マルチチャンネル" if multi_mode else "シングルボット"
     morning_message = load_random_morning_message()
 
+    # 週末キャッチアップ: 月曜(JST)の実行時は取得期間を 72時間（金土日の3日分）に拡張する。
+    # 平日9時運用のため、月曜は前回実行(金曜)以降の未配信分をまとめて配信する。
+    WEEKEND_CATCHUP_HOURS = 72
+    hours = args.hours
+    if args.weekend_catchup and now_jst.weekday() == 0:  # 0 = 月曜
+        hours = WEEKEND_CATCHUP_HOURS
+        print(f"  [INFO] 月曜のため週末キャッチアップ: 取得期間を {args.hours}h → {hours}h（金土日）に拡張")
+
     print(f"=== RSS Bot 起動 / Started ===")
     print(f"  実行時刻    : {now_jst.strftime('%Y-%m-%d %H:%M')} JST")
     print(f"  モード      : {mode_label}")
@@ -1397,7 +1408,7 @@ def main() -> None:
     else:
         cat_label = "、".join(args.category) if getattr(args, "category", None) else "全カテゴリ"
         print(f"  対象カテゴリ: {cat_label}")
-    print(f"  取得期間    : 過去 {args.hours} 時間")
+    print(f"  取得期間    : 過去 {hours} 時間")
     print(f"  Dry-run     : {args.dry_run}")
     print()
 
@@ -1421,7 +1432,7 @@ def main() -> None:
 
     # RSS 収集（1回だけ）/ Collect RSS once
     print("--- RSS 収集 ---")
-    all_entries = collect_all_entries(collect_urls, args.hours, args.fallback_items)
+    all_entries = collect_all_entries(collect_urls, hours, args.fallback_items)
     print(f"\n  合計 {len(all_entries)} 件取得\n")
 
     # ===== マルチチャンネルモード =====
@@ -1620,7 +1631,7 @@ def main() -> None:
                 categories=categories if categories else None,
                 all_entries=all_entries,
                 category_keywords=category_keywords,
-                hours_ago=args.hours,
+                hours_ago=hours,
                 now_jst=now_jst,
                 dry_run=args.dry_run,
                 anthropic_api_key=ANTHROPIC_API_KEY,
@@ -1643,7 +1654,7 @@ def main() -> None:
             categories=category,
             all_entries=all_entries,
             category_keywords=category_keywords,
-            hours_ago=args.hours,
+            hours_ago=hours,
             now_jst=now_jst,
             dry_run=args.dry_run,
             anthropic_api_key=ANTHROPIC_API_KEY,

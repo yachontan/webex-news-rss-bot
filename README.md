@@ -52,6 +52,7 @@ A Python script that collects today's RSS news in parallel, deduplicates, re-ran
 | **ソースベース振り分け (source_groups)** | 記事本文のキーワードではなく「どの RSS フィード由来か」でチャンネルを決定。`urls.yml` の名前付きグループを `bots.yml` の `source_groups` で参照し、そのフィード由来の記事を専有配信（例: Cisco Security Advisories を専用スペースへ隔離） | Route by source feed via named `urls.yml` groups |
 | **Cisco Advisory の CVSS 併記（危険度カラー）** | Cisco Security Advisory の記事に、Cisco 公開の構造化データ（CVRF）から取得した実際の **CVSS Base Score** を、深刻度に応じた色付きバッジで表示（🔴 Critical / 🟠 High / 🟡 Medium・Low）。複数スコアは範囲表記＋最大値で色付け（`🔴 CVSS 7.5〜9.1（複数該当）`）。LLM には推測させず実値を取得 | Color-coded CVSS badge for Cisco advisories (fetched from CVRF) |
 | **空チャンネルは無投稿** | 当日に該当ニュースが0件のスペースには、空通知も含め一切投稿しない | Skip posting entirely when a channel has no matching news |
+| **週末キャッチアップ（月曜）** | `--weekend-catchup` 指定時、**月曜の実行のみ**取得期間を72時間（金土日の3日分）に自動拡張。平日9時運用で週末の未配信分をまとめて配信 | Monday auto-extends the window to 72h (Fri–Sun) |
 | **高度な重複排除** | 媒体名(`(共同通信)`等)除去後、①タイトル類似度85%以上、②漢字bigram Jaccard 20%以上、③漢字bigram Overlap 50%以上+共通5件以上、④タイトル55%+概要55%、⑤**英語タイトルの単語Jaccard 50%以上（両者4語以上）** のいずれかで統合し **最新公開日時の記事を採用**。正規化・bigram・トークン集合は前計算済みで高速 | Hybrid 5-way dedup: kanji-bigram for Japanese + word-level Jaccard for English; precomputed for speed |
 | **LLM再ランク（ニュース選出）** | 1チャンネル15件超のとき、スコア上位40候補を Claude が**読者（Cisco SE）にとっての重要度順**に15件選定。API未設定・失敗時はスコア階層＋ランダム抽出に自動フォールバック | LLM re-ranking picks top 15 by reader relevance; falls back to stratified random sampling |
 | **SSLフォールバック** | SSL証明書検証失敗時に自動で `verify=False` リトライ（HuggingFace等のmacOS証明書問題に対応） | Auto-fallback to `verify=False` on SSL failure |
