@@ -136,6 +136,45 @@ def load_url_groups(path: str = URLS_FILE) -> dict[str, list[str]]:
                 groups.setdefault(name, []).extend(urls)
     return groups
 
+
+def load_weather_config(path: str = URLS_FILE) -> dict | None:
+    """
+    urls.yml 内の weather エントリ（天気API設定）を読み込みます。
+    Loads the weather API config from the `weather` entry in urls.yml.
+
+    形式 / Format:
+        - weather:
+            api_url: https://api.open-meteo.com/v1/forecast
+            locations:
+              - { label: 東京, lat: 35.6895, lon: 139.6917 }
+
+    URL・地点の正本は urls.yml に集約し、Python コードには直書きしない。
+    未定義・不完全な場合は None を返す（デイリーダイジェストは天気ブロックを省略）。
+    weather エントリは urls / group キーを持たないため RSS 収集からは無視される。
+    """
+    data = _read_urls_yaml(path)
+    for item in data:
+        if not (isinstance(item, dict) and item.get("weather")):
+            continue
+        w = item["weather"] or {}
+        api_url = str(w.get("api_url") or "").strip()
+        locations: list[tuple[str, float, float]] = []
+        for loc in (w.get("locations") or []):
+            if not isinstance(loc, dict):
+                continue
+            label = str(loc.get("label") or "").strip()
+            lat, lon = loc.get("lat"), loc.get("lon")
+            if label and lat is not None and lon is not None:
+                try:
+                    locations.append((label, float(lat), float(lon)))
+                except (TypeError, ValueError):
+                    print(f"  [WARN] urls.yml weather: 地点 '{label}' の lat/lon が不正です")
+        if api_url and locations:
+            return {"api_url": api_url, "locations": locations}
+        print("  [WARN] urls.yml の weather 設定が不完全です（api_url / locations を確認）")
+        return None
+    return None
+
 # ===========================================================
 # LLM (Claude) 要約処理 / LLM (Claude) Summarization
 # ===========================================================
@@ -384,6 +423,163 @@ def enrich_cisco_cvss_in_place(entries: list[dict]) -> None:
             e["summary"] = _strip_cvss_mentions(e.get("summary", ""))
             print(f"      {color} CVSS {cvss}: {e['title'][:30]}...")
     print("    --- CVSS 取得完了 ---")
+
+# ===========================================================
+# 天気取得（Open-Meteo）/ Weather (Open-Meteo, key-less & free)
+# ===========================================================
+# 対象地点・API URL は urls.yml の weather エントリに集約する（コードに直書きしない）。
+# 読み込みは load_weather_config()。以下は天気コード→表示の変換ロジックのみを持つ。
+
+# WMO weather_code → (絵文字, 日本語ラベル)
+# https://open-meteo.com/en/docs（WW コード表）
+WMO_WEATHER = {
+    0:  ("☀️", "快晴"),
+    1:  ("🌤", "晴れ"),
+    2:  ("⛅", "晴れ時々くもり"),
+    3:  ("☁️", "くもり"),
+    45: ("🌫", "霧"),
+    48: ("🌫", "霧氷"),
+    51: ("🌦", "弱い霧雨"),
+    53: ("🌦", "霧雨"),
+    55: ("🌦", "強い霧雨"),
+    56: ("🌧", "着氷性の霧雨"),
+    57: ("🌧", "着氷性の霧雨"),
+    61: ("🌦", "小雨"),
+    63: ("🌧", "雨"),
+    65: ("🌧", "強い雨"),
+    66: ("🌧", "着氷性の雨"),
+    67: ("🌧", "着氷性の雨"),
+    71: ("🌨", "小雪"),
+    73: ("❄️", "雪"),
+    75: ("❄️", "大雪"),
+    77: ("🌨", "細氷"),
+    80: ("🌦", "にわか雨"),
+    81: ("🌧", "にわか雨"),
+    82: ("⛈", "激しいにわか雨"),
+    85: ("🌨", "にわか雪"),
+    86: ("❄️", "強いにわか雪"),
+    95: ("⛈", "雷雨"),
+    96: ("⛈", "雹を伴う雷雨"),
+    99: ("⛈", "雹を伴う雷雨"),
+}
+
+
+def _wmo_label(code) -> tuple[str, str]:
+    """weather_code を (絵文字, 日本語ラベル) に変換。未知コードは汎用表示。"""
+    try:
+        return WMO_WEATHER.get(int(code), ("🌡", "不明"))
+    except (TypeError, ValueError):
+        return ("🌡", "不明")
+
+
+def fetch_weather(api_url: str, label: str, lat: float, lon: float) -> dict | None:
+    """
+    Open-Meteo から指定地点の「今日・明日」の予報を取得する。
+    api_url は urls.yml の weather 設定から渡す（コードに直書きしない）。
+    取得失敗時は None を返す（呼び出し側でその地点だけスキップ）。
+    Fetches today's & tomorrow's forecast for one location; returns None on failure.
+    """
+    params = {
+        "latitude":  lat,
+        "longitude": lon,
+        "current":   "temperature_2m,weather_code",
+        "daily":     "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        "timezone":  "Asia/Tokyo",
+        "forecast_days": 2,
+    }
+    try:
+        resp = requests.get(api_url, params=params, timeout=15, verify=SSL_VERIFY)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"    [WARN] 天気取得失敗（{label}）: {e}")
+        return None
+
+    daily = data.get("daily") or {}
+    codes = daily.get("weather_code") or []
+    tmax  = daily.get("temperature_2m_max") or []
+    tmin  = daily.get("temperature_2m_min") or []
+    pop   = daily.get("precipitation_probability_max") or []
+
+    def _day(i: int) -> dict | None:
+        if i >= len(codes):
+            return None
+        return {
+            "code": codes[i],
+            "tmax": tmax[i] if i < len(tmax) else None,
+            "tmin": tmin[i] if i < len(tmin) else None,
+            "pop":  pop[i]  if i < len(pop)  else None,
+        }
+
+    current = data.get("current") or {}
+    return {
+        "label":        label,
+        "current_temp": current.get("temperature_2m"),
+        "today":        _day(0),
+        "tomorrow":     _day(1),
+    }
+
+
+def _format_day(day: dict | None) -> str:
+    """1日分の予報を「⛅くもり 28°/24° ☔40%」形式に整形。"""
+    if not day:
+        return "—"
+    emoji, name = _wmo_label(day.get("code"))
+    tmax, tmin, pop = day.get("tmax"), day.get("tmin"), day.get("pop")
+    if tmax is not None and tmin is not None:
+        temp = f" {round(tmax)}°/{round(tmin)}°"
+    elif tmax is not None:
+        temp = f" {round(tmax)}°"
+    else:
+        temp = ""
+    pop_str = f" ☔{round(pop)}%" if pop is not None else ""
+    return f"{emoji}{name}{temp}{pop_str}"
+
+
+def format_weather_block(results: list[dict]) -> str:
+    """天気結果リストを Markdown ブロックに整形する。全滅（空）なら空文字を返す。"""
+    results = [r for r in results if r]
+    if not results:
+        return ""
+    lines = ["🌤 **今日・明日の天気**"]
+    for r in results:
+        cur = f"（現在 {round(r['current_temp'])}°）" if r.get("current_temp") is not None else ""
+        lines.append(
+            f"- **{r['label']}**{cur}\n"
+            f"　　今日: {_format_day(r.get('today'))}　／　明日: {_format_day(r.get('tomorrow'))}"
+        )
+    return "\n".join(lines)
+
+
+# ===========================================================
+# 日本語ニュース判定・最低件数保証 / Japanese news helpers
+# ===========================================================
+
+_JP_CHAR_RE = re.compile(r"[぀-ゟ゠-ヿ]")  # ひらがな(U+3040–309F) + カタカナ(U+30A0–30FF)
+
+
+def is_japanese_text(text: str) -> bool:
+    """
+    タイトル等に日本語（ひらがな/カタカナ）が含まれれば True。
+    漢字のみ（中国語の可能性）は False とし、日本語記事だけを拾う。
+    """
+    return bool(_JP_CHAR_RE.search(text or ""))
+
+
+def pick_japanese(pool: list[dict], exclude_links: set[str], minimum: int) -> list[dict]:
+    """
+    pool から日本語記事を新着順に最大 minimum 件返す（exclude_links に含む link は除外）。
+    ダイジェストの日本ニュース枠と、一般チャンネルの最低件数補充の両方で再利用する。
+    """
+    if minimum <= 0:
+        return []
+    candidates = [
+        e for e in pool
+        if is_japanese_text(e.get("title", "")) and (e.get("link") or "") not in exclude_links
+    ]
+    candidates.sort(key=lambda x: x["published"], reverse=True)
+    return candidates[:minimum]
+
 
 _CAT_ENV_VAR_RE = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}')
 
@@ -1209,6 +1405,7 @@ def process_channel(
     morning_message: str = "",
     pre_filtered: list[dict] | None = None,
     cat_label_override: str | None = None,
+    digest_collector: dict[str, list[dict]] | None = None,
 ) -> None:
     """
     1チャンネル分のフィルタリングと送信を処理します。
@@ -1268,6 +1465,11 @@ def process_channel(
 
     print(f"    送信対象: {len(filtered)} 件")
 
+    # デイリーダイジェスト用に「実際に送る記事」を記録する（dry-run でも記録＝プレビュー可能）。
+    # 見出しのみ採用のため要約有無に依存しない。0件チャンネルは記録しない。
+    if digest_collector is not None and filtered:
+        digest_collector[channel_name] = list(filtered)
+
     header = (
         f"🗞️ **{channel_name}**\n"
         f"🏷 カテゴリ: **{cat_label}**　｜　✅ {len(filtered)} 件　｜　⏱ {now_jst.strftime('%Y-%m-%d %H:%M')} JST\n"
@@ -1298,6 +1500,108 @@ def process_channel(
         print(f"{'='*50}")
     else:
         build_and_send(filtered, header, space_id, bot_token, dry_run=False, morning_message=morning_message)
+
+
+# ===========================================================
+# デイリーダイジェスト（天気＋投稿ニュース集約）/ Daily digest
+# ===========================================================
+
+DIGEST_TOP_N = 5          # ダイジェストで各チャンネルに載せる見出しの上限
+DIGEST_MIN_JAPANESE = 5   # 「日本のニュース」枠の最低件数
+
+
+def _digest_entry_line(e: dict) -> str:
+    """ダイジェスト1行（見出し＋リンク＋日付）。要約は載せず簡潔に。"""
+    date = e["published"].astimezone(
+        datetime.timezone(datetime.timedelta(hours=9))
+    ).strftime('%m/%d %H:%M')
+    return f"- [{e['title']}]({e['link']})　（📅 {date} JST）"
+
+
+def build_digest_message(
+    weather_results: list[dict],
+    digest_collector: dict[str, list[dict]],
+    all_entries: list[dict],
+    now_jst: datetime.datetime,
+    top_n: int = DIGEST_TOP_N,
+    min_japanese: int = DIGEST_MIN_JAPANESE,
+) -> str:
+    """
+    天気（今日・明日／4地点）＋各チャンネル投稿ダイジェスト＋日本のニュース枠を
+    1つの Markdown メッセージに組み立てる。
+    """
+    weekday = "月火水木金土日"[now_jst.weekday()]
+    parts = [
+        f"🌅 **デイリーブリーフィング**　{now_jst.strftime('%Y-%m-%d')} ({weekday})",
+        "─" * 40,
+    ]
+
+    # 天気ブロック（全滅時は省略）
+    weather_block = format_weather_block(weather_results)
+    if weather_block:
+        parts.append(weather_block)
+        parts.append("─" * 40)
+
+    # 既にダイジェストへ載せた link（日本のニュース枠の重複回避に使う）
+    shown_links: set[str] = set()
+
+    # チャンネル別ダイジェスト
+    parts.append("🗞 **本日のニュースダイジェスト**")
+    any_channel = False
+    for ch_name, entries in digest_collector.items():
+        if not entries:
+            continue
+        any_channel = True
+        block = [f"\n**▶ {ch_name}**（{len(entries)}件）"]
+        for e in entries[:top_n]:
+            block.append(_digest_entry_line(e))
+            link = e.get("link") or ""
+            if link:
+                shown_links.add(link)
+        if len(entries) > top_n:
+            block.append(f"　…他 {len(entries) - top_n} 件")
+        parts.append("\n".join(block))
+    if not any_channel:
+        parts.append("（本日は各チャンネルへの投稿がありませんでした）")
+
+    # 🇯🇵 日本のニュース枠（最低 min_japanese 件を保証・既掲載と重複しない新着順）
+    jp = pick_japanese(all_entries, shown_links, min_japanese)
+    if jp:
+        block = ["\n🇯🇵 **日本のニュース**"]
+        for e in jp:
+            block.append(_digest_entry_line(e))
+        parts.append("\n".join(block))
+
+    return "\n".join(parts)
+
+
+def send_digest(
+    message: str,
+    space_id: str,
+    bot_token: str,
+    dry_run: bool,
+    max_chars: int = 6000,
+) -> None:
+    """ダイジェストを送信する。max_chars を超える場合は行単位で分割。dry-run 時は出力のみ。"""
+    lines = message.split("\n")
+    chunks: list[str] = []
+    buf: list[str] = []
+    for ln in lines:
+        if buf and len("\n".join(buf)) + len(ln) + 1 > max_chars:
+            chunks.append("\n".join(buf))
+            buf = ["**(続き / Continued)**"]
+        buf.append(ln)
+    if buf:
+        chunks.append("\n".join(buf))
+
+    for i, chunk in enumerate(chunks):
+        if dry_run:
+            if i:
+                print("--- (分割) ---")
+            print(chunk)
+        else:
+            send_webex_message(space_id, chunk, bot_token)
+            time.sleep(1)
 
 
 # ===========================================================
@@ -1350,6 +1654,7 @@ def main() -> None:
     # カスタムファイルパスが指定された場合は再読み込み
     rss_urls = load_urls(args.urls_file)
     url_groups = load_url_groups(args.urls_file)
+    weather_config = load_weather_config(args.urls_file)  # デイリーダイジェスト用（urls.yml に集約）
     if args.categories_file != CATEGORIES_FILE:
         category_keywords = load_categories(args.categories_file)
     if args.bots_file != BOTS_FILE:
@@ -1404,7 +1709,14 @@ def main() -> None:
         active_channels = channels
         if hasattr(args, "channel") and args.channel:
             active_channels = [ch for ch in channels if ch["name"] in args.channel]
-        print(f"  チャンネル数: {len(active_channels)} / {len(channels)}")
+        # ダイジェストチャンネル（digest: true）は通常のフィルタ・配信ループから分離する。
+        # 全チャンネル配信後に、天気＋各チャンネルの投稿ダイジェストをまとめて送る。
+        digest_channels = [ch for ch in active_channels if ch.get("digest")]
+        active_channels = [ch for ch in active_channels if not ch.get("digest")]
+        print(
+            f"  チャンネル数: {len(active_channels)} / {len(channels)}"
+            + (f"（＋ダイジェスト {len(digest_channels)}）" if digest_channels else "")
+        )
     else:
         cat_label = "、".join(args.category) if getattr(args, "category", None) else "全カテゴリ"
         print(f"  対象カテゴリ: {cat_label}")
@@ -1599,6 +1911,42 @@ def main() -> None:
             for name, before, after in redistribution_log:
                 print(f"  ▷ {name}: {before} 件 → {after} 件（{before - after} 件をニッチチャンネルへ譲渡）")
 
+        # Phase 2.5: 「日本語ニュース最低件数の補充」
+        # min_japanese 指定チャンネル（＝世の中ニュース/一般）が最低件数に満たない場合、
+        # 厳格な必須語ゲートを迂回して all_entries の日本語記事で新着順に補充する。
+        # 他チャンネルが既に配信する記事とは重複させない（all_claimed_links）。
+        all_claimed_links: set[str] = set()
+        for ents in channel_filtered.values():
+            for e in ents:
+                link = e.get("link") or ""
+                if link:
+                    all_claimed_links.add(link)
+
+        for ch in active_channels:
+            min_jp = ch.get("min_japanese")
+            if not min_jp:
+                continue
+            name = ch.get("name", "Unnamed")
+            current = channel_filtered.get(name, [])
+            shortfall = int(min_jp) - len(current)
+            if shortfall <= 0:
+                continue
+            backfill = pick_japanese(all_entries, all_claimed_links, shortfall)
+            if backfill:
+                channel_filtered[name] = current + backfill
+                for e in backfill:
+                    link = e.get("link") or ""
+                    if link:
+                        all_claimed_links.add(link)
+                print(f"--- 日本語ニュース補充（{name}）---")
+                print(
+                    f"  ▷ {name}: {len(current)} 件 → {len(channel_filtered[name])} 件"
+                    f"（日本語記事 {len(backfill)} 件を必須語ゲート迂回で補充）"
+                )
+
+        # デイリーダイジェスト用: 各チャンネルが実際に送った記事を集める入れ物。
+        digest_collector: dict[str, list[dict]] = {}
+
         # Phase 3: チャンネルごとに配信処理（事前フィルタ結果を渡す）
         print("\n--- チャンネル別配信 ---")
         for ch in active_channels:
@@ -1640,8 +1988,49 @@ def main() -> None:
                 morning_message=morning_message,
                 pre_filtered=channel_filtered.get(ch_name),
                 cat_label_override=cat_label_override,
+                digest_collector=digest_collector,
             )
             time.sleep(1)  # チャンネル間のレート制限
+
+        # Phase 4: デイリーダイジェスト（天気＋各チャンネル投稿ダイジェスト＋日本のニュース枠）
+        # 全チャンネル配信後に、実際に送られた記事を集約して1通投稿する。
+        if digest_channels:
+            print("\n--- デイリーダイジェスト ---")
+            if weather_config:
+                locs = weather_config["locations"]
+                api_url = weather_config["api_url"]
+                labels = "/".join(l for (l, _, _) in locs)
+                print(f"  天気を取得中（Open-Meteo, {len(locs)}地点: {labels}）...")
+                weather_results = [
+                    fetch_weather(api_url, label, lat, lon) for (label, lat, lon) in locs
+                ]
+                ok_weather = sum(1 for r in weather_results if r)
+                print(f"  天気取得: {ok_weather}/{len(locs)} 地点")
+            else:
+                weather_results = []
+                print("  [INFO] urls.yml に weather 設定が無いため天気ブロックを省略します")
+
+            digest_message = build_digest_message(
+                weather_results, digest_collector, all_entries, now_jst
+            )
+            for ch in digest_channels:
+                ch_name   = ch.get("name", "Unnamed")
+                space_id  = ch.get("webex_space_id", "")
+                bot_token = ch.get("webex_bot_token", "") or WEBEX_BOT_TOKEN
+                if ch.get("_skip_reason") or not space_id:
+                    reason = ch.get("_skip_reason") or "webex_space_id が未設定"
+                    print(f"  [SKIP] {ch_name}: {reason}")
+                    continue
+                if not bot_token:
+                    print(f"  [SKIP] {ch_name}: bot_token が未設定です (.env の WEBEX_BOT_TOKEN または bots.yml の webex_bot_token を設定してください)")
+                    continue
+                print(f"  ▶ {ch_name} へダイジェストを送信")
+                if args.dry_run:
+                    print(f"\n{'='*50}")
+                send_digest(digest_message, space_id, bot_token, dry_run=args.dry_run)
+                if args.dry_run:
+                    print(f"{'='*50}")
+                time.sleep(1)
 
     # ===== シングルボットモード =====
     else:

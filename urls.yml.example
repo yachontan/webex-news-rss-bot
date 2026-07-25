@@ -7,6 +7,16 @@
 # - https://<your rss url1>
 # - https://<your rss url2>
 #
+# 天気API（任意）/ Weather API (optional):
+#   デイリーダイジェスト（bots.yml の digest: true）で使う天気API設定。
+#   URL・地点の正本を urls.yml に集約し、Python には直書きしない。
+#   RSS ではないため収集対象からは自動除外される（loader が weather を無視）。
+# - weather:
+#     api_url: https://api.open-meteo.com/v1/forecast
+#     locations:
+#       - { label: 東京, lat: 35.6895, lon: 139.6917 }
+#       - { label: 横浜, lat: 35.4437, lon: 139.6380 }
+#
 # 名前付きグループ / Named group (optional):
 #   bots.yml の source_groups から参照する専用フィードをまとめる。
 #   URL の正本を urls.yml に一本化し、bots.yml には URL を書かずグループ名だけ指定する。

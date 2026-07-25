@@ -52,9 +52,11 @@ A Python script that collects today's RSS news in parallel, deduplicates, re-ran
 | **ソースベース振り分け (source_groups)** | 記事本文のキーワードではなく「どの RSS フィード由来か」でチャンネルを決定。`urls.yml` の名前付きグループを `bots.yml` の `source_groups` で参照し、そのフィード由来の記事を専有配信（例: Cisco Security Advisories を専用スペースへ隔離） | Route by source feed via named `urls.yml` groups |
 | **Cisco Advisory の CVSS 併記（危険度カラー）** | Cisco Security Advisory の記事に、Cisco 公開の構造化データ（CVRF）から取得した実際の **CVSS Base Score** を、深刻度に応じた色付きバッジで表示（🔴 Critical / 🟠 High / 🟡 Medium・Low）。複数スコアは範囲表記＋最大値で色付け（`🔴 CVSS 7.5〜9.1（複数該当）`）。LLM には推測させず実値を取得 | Color-coded CVSS badge for Cisco advisories (fetched from CVRF) |
 | **空チャンネルは無投稿** | 当日に該当ニュースが0件のスペースには、空通知も含め一切投稿しない | Skip posting entirely when a channel has no matching news |
+| **デイリーダイジェスト (digest)** | `digest: true` の専用チャンネルが、全チャンネル配信後に **今日・明日の天気（東京・横浜・千葉・札幌）＋各チャンネルが実際に投稿したニュースのダイジェスト（見出し上位5件）＋🇯🇵日本のニュース枠** を1通に集約して配信。天気は **Open-Meteo**（APIキー不要・無料）。RSS再取得せず、投稿済み結果をメモリから集約するため内容が完全一致 | Daily briefing bot: weather (Open-Meteo, key-less) + digest of what each channel posted + a guaranteed Japanese-news section |
+| **日本語ニュース下限保証 (min_japanese)** | `min_japanese: N` 指定チャンネルが N 件未満のとき、日本語記事（タイトルにひらがな/カタカナを含む）を新着順に補充。厳格なキーワードゲートで日本のニュースが減った場合の下限保証。ダイジェストの日本のニュース枠も同ロジックで最低5件を確保 | Guarantees a minimum count of Japanese-language articles (bypassing strict keyword gate) |
 | **週末キャッチアップ（月曜）** | `--weekend-catchup` 指定時、**月曜の実行のみ**取得期間を72時間（金土日の3日分）に自動拡張。平日9時運用で週末の未配信分をまとめて配信 | Monday auto-extends the window to 72h (Fri–Sun) |
 | **高度な重複排除** | 媒体名(`(共同通信)`等)除去後、①タイトル類似度85%以上、②漢字bigram Jaccard 20%以上、③漢字bigram Overlap 50%以上+共通5件以上、④タイトル55%+概要55%、⑤**英語タイトルの単語Jaccard 50%以上（両者4語以上）** のいずれかで統合し **最新公開日時の記事を採用**。正規化・bigram・トークン集合は前計算済みで高速 | Hybrid 5-way dedup: kanji-bigram for Japanese + word-level Jaccard for English; precomputed for speed |
-| **LLM再ランク（ニュース選出）** | 1チャンネル15件超のとき、スコア上位40候補を Claude が**読者（Cisco SE）にとっての重要度順**に15件選定。API未設定・失敗時はスコア階層＋ランダム抽出に自動フォールバック | LLM re-ranking picks top 15 by reader relevance; falls back to stratified random sampling |
+| **LLM再ランク（ニュース選出）** | 1チャンネル15件超のとき、スコア上位40候補を Claude が**読者にとっての重要度順**に15件選定。API未設定・失敗時はスコア階層＋ランダム抽出に自動フォールバック | LLM re-ranking picks top 15 by reader relevance; falls back to stratified random sampling |
 | **SSLフォールバック** | SSL証明書検証失敗時に自動で `verify=False` リトライ（HuggingFace等のmacOS証明書問題に対応） | Auto-fallback to `verify=False` on SSL failure |
 | **フィードリーダ系User-Agent** | `rss-bot/1.0` UAでCISA等のbot対策サイトに対応（※community.cisco.com は2026-07現在それでも403 → トラブルシューティング参照） | Feed-reader UA mitigates anti-bot blocks (some sites still reject) |
 | **Markdownリンク形式** | タイトルと日付を同一行に表示 (`[Title](URL)　（📅 date JST）`) | Title and date on same line with Markdown link |
@@ -199,7 +201,9 @@ channels:
 | **1.5. 優先独占** | `priority: true` のチャンネルにマッチした記事を、他チャンネルから自動除外（例: Cisco記事は Cisco チャンネルでのみ配信） |
 | **1.6. 譲渡 (defers_to)** | `defers_to: [...]` のチャンネルは、指定された譲渡先チャンネルにも該当する記事を譲渡先のみに残し、自分の側から除外（例: AI・機械学習はセキュリティ／ネットワーク寄りの記事を譲る） |
 | **2. ニッチ優先** | 15件超の混雑チャンネルから、同じ記事が15件以下の余裕チャンネルにも該当する場合、余裕側のみに残して混雑側から除外 |
+| **2.5. 日本語下限保証** | `min_japanese: N` を持つチャンネルが N 件未満の場合、`all_entries` の日本語記事（タイトルにひらがな/カタカナを含む）を新着順に補充（他チャンネル配信分とは重複させない）。厳格な必須語ゲートを迂回して日本のニュースの下限を保証 |
 | **3. LLM再ランク** | それでも15件を超えるチャンネルでは、Claude がスコア上位40候補から**重要度順に15件を選定**（API未設定・失敗時はスコア階層＋階層内ランダム抽出にフォールバック）。詳細は[LLMによるニュース選出](#llmによるニュース選出再ランク--llm-re-ranking)参照 |
+| **4. デイリーダイジェスト** | `digest: true` チャンネルへ、全チャンネル配信後に天気（今日・明日／4地点）＋各チャンネルの投稿ダイジェスト＋🇯🇵日本のニュース枠を1通で配信 |
 
 **`priority: true`**: Cisco のような専門カテゴリ向け。該当記事を独占的に配信。  
 **`defers_to: [チャンネル名]`**: AI・機械学習のような汎用カテゴリで、より専門的なチャンネル（セキュリティ・ネットワーク等）にも該当する場合、そちらに譲るための設定。
@@ -264,6 +268,34 @@ channels:
 > なお advisory の記事は、**深刻度に見合う影響（攻撃前提・想定被害）を簡潔にまとめる専用の要約プロンプト**を使います（深刻度はモデルが本文から推測。CVSS 数値はバッジ側で表示）。一般ニュース等は従来どおりの汎用要約プロンプトです。
 
 **空チャンネルは無投稿 / Skip when empty** — 当日に該当ニュースが 0 件のスペースには、空通知も含め一切投稿しません。
+
+#### デイリーダイジェスト（天気＋投稿ニュース集約）/ Daily digest (weather + posted-news recap)
+
+朝に全体像を1か所で把握するための専用チャンネルです。`digest: true` を指定すると、そのチャンネルは自前のカテゴリ収集を行わず、**全チャンネル配信後**に以下を1通へ集約して配信します。
+
+1. **今日・明日の天気**（東京・横浜・千葉・札幌の4地点）… [Open-Meteo](https://open-meteo.com/) から取得（**APIキー不要・無料**）。天気絵文字・最高/最低気温・降水確率を地点ごとに今日/明日の2列で表示。取得に失敗した地点はスキップ（全滅時は天気ブロックごと省略）し、ダイジェスト本体は必ず配信します。
+2. **各チャンネルの投稿ダイジェスト**… 各チャンネルが**実際に投稿した**記事を、チャンネル別に見出し上位5件（超過分は「…他M件」）で列挙。RSS を再取得せず、配信結果をメモリから集約するため本体投稿と内容が完全一致します。
+3. **🇯🇵 日本のニュース枠**… 収集した全記事から日本語記事（タイトルにひらがな/カタカナを含む）を新着順に**最低5件**掲載（各チャンネル枠で既に出た記事とは重複させない）。
+
+```yaml
+# bots.yml
+- name: デイリーダイジェスト
+  webex_space_id: ${WEBEX_SPACE_ID_DIGEST}
+  webex_bot_token: ${WEBEX_BOT_TOKEN_DIGEST}
+  digest: true         # 自身は収集せず、他チャンネルの投稿結果＋天気を集約
+  categories: []
+```
+
+`.env` に `WEBEX_SPACE_ID_DIGEST`（必要なら `WEBEX_BOT_TOKEN_DIGEST`）を設定するまで、このチャンネルは自動的にスキップされます（段階導入が安全）。Room ID は `python check_rooms.py --find "デイリーダイジェスト"` で確認できます。
+
+**日本語ニュースの下限保証（`min_japanese`）** — 厳格なキーワードゲート（`一般` カテゴリの必須語）で日本のニュースが減った場合の保険として、通常チャンネルにも `min_japanese: N` を指定できます。確定件数が N 件未満なら、日本語記事を新着順に補充して下限を満たします（Phase 2.5、他チャンネル配信分とは重複させない）。
+
+```yaml
+- name: 世の中ニュース
+  min_japanese: 5      # 5件未満なら日本語記事で補充
+  categories:
+    - 一般
+```
 
 ### 2. キーワード設定 (`categories.yml`) / Category keywords
 記事のタイトル・概要・タグ・**URL（リンク）** からカテゴリを判定するためのキーワードを定義します。  

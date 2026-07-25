@@ -26,6 +26,15 @@ channels:
       - ネットワーク
       - Cisco
 
+  # チャンネル 2b: 日本の一般ニュース（最低件数を保証する例）
+  #   min_japanese: 確定件数がこの値未満なら、日本語記事（タイトルにひらがな/カタカナを含む）を
+  #   新着順に補充して下限を満たす。厳格なキーワードゲートで日本のニュースが減った場合の保険。
+  # - name: 世の中ニュース
+  #   webex_space_id: ${WEBEX_SPACE_ID_GENERAL}
+  #   min_japanese: 5
+  #   categories:
+  #     - 一般
+
   # チャンネル 3: 取得元 RSS フィードで振り分ける専用スペース（source_groups）
   #   categories（記事本文キーワード）ではなく「どのフィード由来か」で振り分ける。
   #   フィードURLは urls.yml の group: <名前> に定義し、ここでは名前だけを参照する
@@ -41,7 +50,13 @@ channels:
   #     - cisco-advisory   # urls.yml の group: cisco-advisory を参照
   #   categories: []       # source_groups のみで振り分け
 
-  # チャンネル 4: すべてのカテゴリを配信するダイジェスト
-  # - name: 全カテゴリダイジェスト
+  # チャンネル 4: デイリーダイジェスト（天気＋各チャンネル投稿ニュースの集約）
+  #   digest: true のチャンネルは自前のカテゴリ収集を行わず、全チャンネル配信後に
+  #   「天気（今日・明日／東京・横浜・千葉・札幌）＋各チャンネルの投稿ダイジェスト
+  #   （見出し上位5件）＋🇯🇵日本のニュース枠（最低5件）」を1通に集約して配信する。
+  #   webex_space_id / webex_bot_token が未設定の間は自動でスキップされる。
+  # - name: デイリーダイジェスト
   #   webex_space_id: ${WEBEX_SPACE_ID_DIGEST}
-  #   categories: []   # 空 = 全カテゴリ
+  #   webex_bot_token: ${WEBEX_BOT_TOKEN_DIGEST}
+  #   digest: true
+  #   categories: []
