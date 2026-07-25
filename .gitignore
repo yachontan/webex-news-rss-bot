@@ -12,6 +12,7 @@
 !categories.yml
 !bots.yml.example
 !urls.yml.example
+!regions.yml.example
 !check_rooms.py
 !morning_messages.txt.example
 !categories-private.yml.example

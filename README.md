@@ -1,11 +1,11 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v1.1.0-blue)
-![Release Date](https://img.shields.io/badge/release-2026--07--13-green)
+![Version](https://img.shields.io/badge/version-v1.2.0-blue)
+![Release Date](https://img.shields.io/badge/release-2026--07--25-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v1.1.0` ／ **Release Date**: 2026-07-13
+**Version**: `v1.2.0` ／ **Release Date**: 2026-07-25
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約・再ランクスクリプト / RSS-to-Webex News Notifier with LLM Summary & Re-ranking**
 
@@ -54,6 +54,7 @@ A Python script that collects today's RSS news in parallel, deduplicates, re-ran
 | **空チャンネルは無投稿** | 当日に該当ニュースが0件のスペースには、空通知も含め一切投稿しない | Skip posting entirely when a channel has no matching news |
 | **デイリーダイジェスト (digest)** | `digest: true` の専用チャンネルが、全チャンネル配信後に **今日・明日の天気（東京・横浜・千葉・札幌）＋各チャンネルが実際に投稿したニュースのダイジェスト（見出し上位5件）＋🇯🇵日本のニュース枠** を1通に集約して配信。天気は **Open-Meteo**（APIキー不要・無料）。RSS再取得せず、投稿済み結果をメモリから集約するため内容が完全一致 | Daily briefing bot: weather (Open-Meteo, key-less) + digest of what each channel posted + a guaranteed Japanese-news section |
 | **日本語ニュース下限保証 (min_japanese)** | `min_japanese: N` 指定チャンネルが N 件未満のとき、日本語記事（タイトルにひらがな/カタカナを含む）を新着順に補充。厳格なキーワードゲートで日本のニュースが減った場合の下限保証。ダイジェストの日本のニュース枠も同ロジックで最低5件を確保 | Guarantees a minimum count of Japanese-language articles (bypassing strict keyword gate) |
+| **時事ダイジェストの地域バランス (regions.yml)** | デイジェストの日本ニュース枠を、一般・世の中ニュース（テック/経済は除外）から **日本6-7・米国3・その他5** の地域バランスで選ぶ「時事ダイジェスト」枠へ拡張。地域はキーワード判定（米＝アメリカ関連語）、不足時は日本優先で補充。クオータ・地域キーワードは `regions.yml` に集約（不在時は従来の日本ニュース枠にフォールバック） | Region-balanced current-affairs digest (JP 6-7 / US 3 / Other 5) configured via `regions.yml` |
 | **週末キャッチアップ（月曜）** | `--weekend-catchup` 指定時、**月曜の実行のみ**取得期間を72時間（金土日の3日分）に自動拡張。平日9時運用で週末の未配信分をまとめて配信 | Monday auto-extends the window to 72h (Fri–Sun) |
 | **高度な重複排除** | 媒体名(`(共同通信)`等)除去後、①タイトル類似度85%以上、②漢字bigram Jaccard 20%以上、③漢字bigram Overlap 50%以上+共通5件以上、④タイトル55%+概要55%、⑤**英語タイトルの単語Jaccard 50%以上（両者4語以上）** のいずれかで統合し **最新公開日時の記事を採用**。正規化・bigram・トークン集合は前計算済みで高速 | Hybrid 5-way dedup: kanji-bigram for Japanese + word-level Jaccard for English; precomputed for speed |
 | **LLM再ランク（ニュース選出）** | 1チャンネル15件超のとき、スコア上位40候補を Claude が**読者にとっての重要度順**に15件選定。API未設定・失敗時はスコア階層＋ランダム抽出に自動フォールバック | LLM re-ranking picks top 15 by reader relevance; falls back to stratified random sampling |
@@ -203,7 +204,7 @@ channels:
 | **2. ニッチ優先** | 15件超の混雑チャンネルから、同じ記事が15件以下の余裕チャンネルにも該当する場合、余裕側のみに残して混雑側から除外 |
 | **2.5. 日本語下限保証** | `min_japanese: N` を持つチャンネルが N 件未満の場合、`all_entries` の日本語記事（タイトルにひらがな/カタカナを含む）を新着順に補充（他チャンネル配信分とは重複させない）。厳格な必須語ゲートを迂回して日本のニュースの下限を保証 |
 | **3. LLM再ランク** | それでも15件を超えるチャンネルでは、Claude がスコア上位40候補から**重要度順に15件を選定**（API未設定・失敗時はスコア階層＋階層内ランダム抽出にフォールバック）。詳細は[LLMによるニュース選出](#llmによるニュース選出再ランク--llm-re-ranking)参照 |
-| **4. デイリーダイジェスト** | `digest: true` チャンネルへ、全チャンネル配信後に天気（今日・明日／4地点）＋各チャンネルの投稿ダイジェスト＋🇯🇵日本のニュース枠を1通で配信 |
+| **4. デイリーダイジェスト** | `digest: true` チャンネルへ、全チャンネル配信後に天気（今日・明日／4地点）＋各チャンネルの投稿ダイジェスト＋時事ダイジェスト（`regions.yml` があれば地域バランス日本/米国/その他、無ければ🇯🇵日本のニュース枠）を1通で配信 |
 
 **`priority: true`**: Cisco のような専門カテゴリ向け。該当記事を独占的に配信。  
 **`defers_to: [チャンネル名]`**: AI・機械学習のような汎用カテゴリで、より専門的なチャンネル（セキュリティ・ネットワーク等）にも該当する場合、そちらに譲るための設定。
@@ -275,7 +276,7 @@ channels:
 
 1. **今日・明日の天気**（東京・横浜・千葉・札幌の4地点）… [Open-Meteo](https://open-meteo.com/) から取得（**APIキー不要・無料**）。天気絵文字・最高/最低気温・降水確率を地点ごとに今日/明日の2列で表示。取得に失敗した地点はスキップ（全滅時は天気ブロックごと省略）し、ダイジェスト本体は必ず配信します。
 2. **各チャンネルの投稿ダイジェスト**… 各チャンネルが**実際に投稿した**記事を、チャンネル別に見出し上位5件（超過分は「…他M件」）で列挙。RSS を再取得せず、配信結果をメモリから集約するため本体投稿と内容が完全一致します。
-3. **🇯🇵 日本のニュース枠**… 収集した全記事から日本語記事（タイトルにひらがな/カタカナを含む）を新着順に**最低5件**掲載（各チャンネル枠で既に出た記事とは重複させない）。
+3. **📰 時事ダイジェスト（地域バランス）** … `regions.yml` があれば、一般・世の中ニュース（テック/経済/専門カテゴリは除外）から **日本6-7・米国3・その他5** の地域バランスで新着順に選出（下記）。`regions.yml` が無い場合は従来の**🇯🇵 日本のニュース枠**（日本語記事を新着順に最低5件）にフォールバックします。いずれも各チャンネル枠で既出の記事とは重複させません。
 
 ```yaml
 # bots.yml
@@ -295,6 +296,20 @@ channels:
   min_japanese: 5      # 5件未満なら日本語記事で補充
   categories:
     - 一般
+```
+
+**時事ダイジェストの地域バランス（`regions.yml`）** — デイジェストの時事枠を地域バランスで構成します。候補は**一般・世の中ニュース**のみ（AI/セキュリティ/ネットワーク/クラウド/Cisco/**経済**などの専門カテゴリは除外。経済は専用スペースの配信で扱う想定）。各記事を「日本 / 米国 / その他」に分類し、クオータに従って新着順に選び、不足分は**日本→その他**の順で補充します（**米国は上限を超えない**）。
+
+- **地域判定**: タイトル＋概要に **米国キーワード**（アメリカ / 米国 / トランプ / ワシントン 等）があれば「米国」、なければ**その他外国キーワード**（中国 / 韓国 / ロシア / 欧州 等）があれば「その他」、いずれも無ければ「日本（国内）」。
+- **設定の集約**: クオータと地域キーワードの正本は `regions.yml`（`regions.yml.example` が雛形）。コードには直書きしません。ファイルが無ければ従来の日本ニュース枠にフォールバックします。
+
+```yaml
+# regions.yml
+quota: { japan: 7, us: 3, other: 5 }
+keywords:
+  us:    [アメリカ, 米国, トランプ, ワシントン, 米軍, 米中]
+  other: [中国, 韓国, ロシア, ウクライナ, 欧州, EU]
+# japan（国内）は上記いずれにも該当しない日本語ニュース
 ```
 
 ### 2. キーワード設定 (`categories.yml`) / Category keywords
@@ -923,7 +938,8 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 | Version | 日付 / Date | 主な変更 / Changes |
 |:---|:---|:---|
-| **v1.1.0** | 2026-07-13 | **ニュース選出と性能の大型アップデート / Selection & performance overhaul**<br>・**LLM再ランク導入**: 15件超のチャンネルは Claude が重要度順に15件を選定（従来のランダム抽出を置換。失敗時は自動フォールバック）。env `ANTHROPIC_RERANK_MODEL` 追加<br>・**フィード取得の並列化**: ホスト別に最大12並列（同一ホストは1秒間隔を維持）で実行時間を大幅短縮<br>・**重複排除の強化**: 英語タイトルの単語Jaccard判定（⑤）を追加、正規化・bigramの前計算で高速化<br>・**バグ修正**: `_score` が複数チャンネル間で上書きされる問題を修正（チャンネル別に独立スコア化）<br>・**ソースベース振り分け**: `source_groups` / `source_feeds` で特定RSSフィード由来の記事を専用チャンネルへ専有配信（Cisco Security Advisories 分離用）。URL正本は `urls.yml` のグループ定義に一元化<br>・`check_rooms.py` 関数化＋`--find` オプション追加<br>・トレンド語の定期見直し（2026-07-13: ガザ/スーダン/主要語の英語版を追加）<br>・README: TCC保護外パス（例 `~/Developer`）での直接実行を推奨構成として明記 |
+| **v1.2.0** | 2026-07-25 | **デイリーダイジェスト配信と運用安定化 / Daily digest & operational hardening**<br>・**デイリーダイジェスト新設**: `digest: true` の専用チャンネルが、全チャンネル配信後に「今日・明日の天気（東京・横浜・千葉・札幌）＋各チャンネルが実際に投稿したニュースの要約＋🇯🇵日本のニュース枠」を1通に集約して配信。天気は **Open-Meteo**（APIキー不要）。RSS を再取得せず既存1実行に統合<br>・**日本語ニュース下限保証**: `min_japanese: N` で、厳格なキーワードゲートにより日本語記事が減った場合に新着順で補充（ダイジェストの日本枠も最低5件を確保）<br>・**週末キャッチアップ**: `--weekend-catchup` により月曜実行時のみ取得期間を72時間（金土日）へ自動拡張<br>・**ネットワーク準備待ち**: `run_rssbot.sh` がスリープ復帰直後の DNS 未準備によるハングを回避（webexapis.com へ疎通するまで最大5分待機）<br>・**設定の外部化**: 天気APIのURL・観測地点をコード直書きから `urls.yml` へ集約（`weather` エントリ。RSS収集は汚染しない）<br>・**時事ダイジェストの地域バランス**: ダイジェストの日本ニュース枠を、一般・世の中ニュース（テック/経済は除外）から **日本6-7・米国3・その他5** の地域バランスで選ぶ「時事ダイジェスト」枠へ拡張。地域はキーワード判定（米=アメリカ関連語）、不足時は日本優先で補充。キーワード・クオータは `regions.yml` に集約（不在時は従来の日本ニュース枠にフォールバック）<br>・`.env.example` / `bots.yml.example` / `urls.yml.example` / `regions.yml.example` を新設定に追従 |
+| v1.1.0 | 2026-07-13 | **ニュース選出と性能の大型アップデート / Selection & performance overhaul**<br>・**LLM再ランク導入**: 15件超のチャンネルは Claude が重要度順に15件を選定（従来のランダム抽出を置換。失敗時は自動フォールバック）。env `ANTHROPIC_RERANK_MODEL` 追加<br>・**フィード取得の並列化**: ホスト別に最大12並列（同一ホストは1秒間隔を維持）で実行時間を大幅短縮<br>・**重複排除の強化**: 英語タイトルの単語Jaccard判定（⑤）を追加、正規化・bigramの前計算で高速化<br>・**バグ修正**: `_score` が複数チャンネル間で上書きされる問題を修正（チャンネル別に独立スコア化）<br>・**ソースベース振り分け**: `source_groups` / `source_feeds` で特定RSSフィード由来の記事を専用チャンネルへ専有配信（Cisco Security Advisories 分離用）。URL正本は `urls.yml` のグループ定義に一元化<br>・`check_rooms.py` 関数化＋`--find` オプション追加<br>・トレンド語の定期見直し（2026-07-13: ガザ/スーダン/主要語の英語版を追加）<br>・README: TCC保護外パス（例 `~/Developer`）での直接実行を推奨構成として明記 |
 | v1.0.4 | 2026-06-11 | launchd 実行ログをラッパースクリプト経由の**タイムスタンプ付きファイル**に変更（実行ごとに `log/launchd_run-YYYYMMDD-HHMMSS.log` を生成） |
 | v1.0.3 | 2026-06-03 | README に **macOS の制限と設計上の理由**（launchd/TCC）および **Windows での利用**（タスクスケジューラ）セクションを追加 |
 | v1.0.2 | 2026-06-03 | `.env.example` を全変数のドキュメント付きに拡充 |

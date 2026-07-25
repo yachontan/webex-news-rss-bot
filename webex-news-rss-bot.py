@@ -175,6 +175,59 @@ def load_weather_config(path: str = URLS_FILE) -> dict | None:
         return None
     return None
 
+
+REGIONS_FILE = os.path.join(_BASE, "regions.yml")
+
+
+def load_regions_config(path: str = REGIONS_FILE) -> dict | None:
+    """
+    regions.yml から時事ダイジェストの地域バランス設定を読み込みます。
+    Loads region-balance config (quota + keywords) for the current-affairs digest.
+
+    形式 / Format:
+        quota: { japan: 7, us: 3, other: 5 }
+        keywords:
+          us:    [アメリカ, 米国, ...]
+          other: [中国, 韓国, ...]
+
+    キーワード・クオータの正本は regions.yml に集約し、Python には直書きしない。
+    ファイルが無い・不完全な場合は None を返す（呼び出し側で従来の日本ニュース枠へ
+    フォールバックする＝後方互換）。
+    """
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        print(f"  [WARN] regions.yml の解析に失敗しました: {e}")
+        return None
+    if not isinstance(data, dict):
+        print("  [WARN] regions.yml の形式が正しくありません（マップ形式で記述してください）")
+        return None
+
+    quota_raw = data.get("quota") or {}
+    kw_raw = data.get("keywords") or {}
+
+    def _int(v, default):
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return default
+
+    quota = {
+        "japan": _int(quota_raw.get("japan"), 7),
+        "us":    _int(quota_raw.get("us"), 3),
+        "other": _int(quota_raw.get("other"), 5),
+    }
+    us_kws    = [str(k).strip() for k in (kw_raw.get("us") or []) if str(k).strip()]
+    other_kws = [str(k).strip() for k in (kw_raw.get("other") or []) if str(k).strip()]
+
+    if not us_kws and not other_kws:
+        print("  [WARN] regions.yml に keywords（us/other）がありません → 地域バランスを無効化")
+        return None
+    return {"quota": quota, "us_keywords": us_kws, "other_keywords": other_kws}
+
 # ===========================================================
 # LLM (Claude) 要約処理 / LLM (Claude) Summarization
 # ===========================================================
@@ -579,6 +632,57 @@ def pick_japanese(pool: list[dict], exclude_links: set[str], minimum: int) -> li
     ]
     candidates.sort(key=lambda x: x["published"], reverse=True)
     return candidates[:minimum]
+
+
+def classify_region(entry: dict, us_keywords: list[str], other_keywords: list[str]) -> str:
+    """
+    記事（タイトル＋概要）を地域分類する: "us" / "other" / "japan"。
+    US を優先評価し（上限管理のため）、次に米国以外の外国、いずれも無ければ国内。
+    既存の _keyword_in_text を再利用（ASCII 短語は語境界、日本語は部分一致）。
+    """
+    text = f"{entry.get('title', '')} {entry.get('summary', '')}".lower()
+    for kw in us_keywords:
+        if _keyword_in_text(kw.lower(), text):
+            return "us"
+    for kw in other_keywords:
+        if _keyword_in_text(kw.lower(), text):
+            return "other"
+    return "japan"
+
+
+def select_by_region_quota(
+    pool: list[dict],
+    us_keywords: list[str],
+    other_keywords: list[str],
+    quota: dict,
+) -> dict:
+    """
+    pool を地域分類し、quota（japan/us/other）に従って各地域を新着順に選ぶ。
+    合計が目標（japan+us+other）に満たない分は、japan→other の順に残り候補で補充する。
+    US は quota["us"] を上限として超えて補充しない。
+    返り値: {"japan": [...], "us": [...], "other": [...]}（各新着順）。
+    """
+    buckets: dict[str, list[dict]] = {"japan": [], "us": [], "other": []}
+    for e in pool:
+        buckets[classify_region(e, us_keywords, other_keywords)].append(e)
+    for b in buckets.values():
+        b.sort(key=lambda x: x["published"], reverse=True)
+
+    total_target = quota["japan"] + quota["us"] + quota["other"]
+    selected = {r: list(buckets[r][:quota[r]]) for r in ("japan", "us", "other")}
+
+    def _count() -> int:
+        return sum(len(v) for v in selected.values())
+
+    # 不足分の補充（US は上限厳守のため対象外。日本優先）。
+    for region in ("japan", "other"):
+        if _count() >= total_target:
+            break
+        for e in buckets[region][quota[region]:]:
+            if _count() >= total_target:
+                break
+            selected[region].append(e)
+    return selected
 
 
 _CAT_ENV_VAR_RE = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}')
@@ -1518,6 +1622,47 @@ def _digest_entry_line(e: dict) -> str:
     return f"- [{e['title']}]({e['link']})　（📅 {date} JST）"
 
 
+def build_jiji_section(
+    all_entries: list[dict],
+    category_keywords: dict[str, list[str]],
+    regions_cfg: dict,
+    exclude_links: set[str],
+) -> str:
+    """
+    時事ダイジェスト（地域バランス）ブロックを生成する。
+
+    候補プール = 「一般（時事）カテゴリにマッチする記事」かつ「既掲載でない」記事。
+    → 「一般」の必須語ゲート（災害/事件/政治/社会 等）で時事のみを positively 抽出する。
+      これにより、ファッション・ペット・美容・芸能などのライフスタイル記事は自然に除外され、
+      テック（AI/セキュリティ 等）・経済も別カテゴリのため入らない（＝ユーザー指定「一般・世の中のみ」）。
+    地域別クオータ（日本/米国/その他）で新着順に選び、不足は日本→その他で補充する。
+    """
+    general_pool = [
+        e for e in filter_by_category(all_entries, ["一般"], category_keywords)
+        if (e.get("link") or "") not in exclude_links
+    ]
+
+    selected = select_by_region_quota(
+        general_pool,
+        regions_cfg["us_keywords"],
+        regions_cfg["other_keywords"],
+        regions_cfg["quota"],
+    )
+    nj, nu, no = len(selected["japan"]), len(selected["us"]), len(selected["other"])
+    if nj + nu + no == 0:
+        return ""
+
+    lines = [f"\n📰 **時事ダイジェスト**（🇯🇵日本 {nj}・🇺🇸米国 {nu}・🌐その他 {no}）"]
+    for key, label in (("japan", "🇯🇵 日本"), ("us", "🇺🇸 米国"), ("other", "🌐 その他")):
+        items = selected[key]
+        if not items:
+            continue
+        lines.append(f"\n**{label}**")
+        for e in items:
+            lines.append(_digest_entry_line(e))
+    return "\n".join(lines)
+
+
 def build_digest_message(
     weather_results: list[dict],
     digest_collector: dict[str, list[dict]],
@@ -1525,10 +1670,15 @@ def build_digest_message(
     now_jst: datetime.datetime,
     top_n: int = DIGEST_TOP_N,
     min_japanese: int = DIGEST_MIN_JAPANESE,
+    category_keywords: dict[str, list[str]] | None = None,
+    regions_cfg: dict | None = None,
 ) -> str:
     """
-    天気（今日・明日／4地点）＋各チャンネル投稿ダイジェスト＋日本のニュース枠を
+    天気（今日・明日／4地点）＋各チャンネル投稿ダイジェスト＋時事ダイジェスト（地域バランス）を
     1つの Markdown メッセージに組み立てる。
+
+    regions_cfg と category_keywords が揃っている場合は地域バランス型の「時事ダイジェスト」枠を、
+    そうでなければ従来の「🇯🇵 日本のニュース（最低 min_japanese 件）」枠を出す（後方互換）。
     """
     weekday = "月火水木金土日"[now_jst.weekday()]
     parts = [
@@ -1564,13 +1714,19 @@ def build_digest_message(
     if not any_channel:
         parts.append("（本日は各チャンネルへの投稿がありませんでした）")
 
-    # 🇯🇵 日本のニュース枠（最低 min_japanese 件を保証・既掲載と重複しない新着順）
-    jp = pick_japanese(all_entries, shown_links, min_japanese)
-    if jp:
-        block = ["\n🇯🇵 **日本のニュース**"]
-        for e in jp:
-            block.append(_digest_entry_line(e))
-        parts.append("\n".join(block))
+    # 時事枠: regions.yml があれば地域バランス型（日本/米国/その他）、無ければ従来の日本ニュース枠。
+    if regions_cfg and category_keywords:
+        jiji = build_jiji_section(all_entries, category_keywords, regions_cfg, shown_links)
+        if jiji:
+            parts.append(jiji)
+    else:
+        # フォールバック: 🇯🇵 日本のニュース枠（最低 min_japanese 件・既掲載と重複しない新着順）
+        jp = pick_japanese(all_entries, shown_links, min_japanese)
+        if jp:
+            block = ["\n🇯🇵 **日本のニュース**"]
+            for e in jp:
+                block.append(_digest_entry_line(e))
+            parts.append("\n".join(block))
 
     return "\n".join(parts)
 
@@ -1655,6 +1811,7 @@ def main() -> None:
     rss_urls = load_urls(args.urls_file)
     url_groups = load_url_groups(args.urls_file)
     weather_config = load_weather_config(args.urls_file)  # デイリーダイジェスト用（urls.yml に集約）
+    regions_cfg = load_regions_config()  # 時事ダイジェストの地域バランス（regions.yml に集約）
     if args.categories_file != CATEGORIES_FILE:
         category_keywords = load_categories(args.categories_file)
     if args.bots_file != BOTS_FILE:
@@ -2010,8 +2167,15 @@ def main() -> None:
                 weather_results = []
                 print("  [INFO] urls.yml に weather 設定が無いため天気ブロックを省略します")
 
+            if regions_cfg:
+                print(
+                    "  時事ダイジェスト: 地域バランス "
+                    f"日本{regions_cfg['quota']['japan']}/米{regions_cfg['quota']['us']}"
+                    f"/その他{regions_cfg['quota']['other']}（regions.yml）"
+                )
             digest_message = build_digest_message(
-                weather_results, digest_collector, all_entries, now_jst
+                weather_results, digest_collector, all_entries, now_jst,
+                category_keywords=category_keywords, regions_cfg=regions_cfg,
             )
             for ch in digest_channels:
                 ch_name   = ch.get("name", "Unnamed")
