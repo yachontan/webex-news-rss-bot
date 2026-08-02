@@ -1,34 +1,100 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v1.2.0-blue)
-![Release Date](https://img.shields.io/badge/release-2026--07--25-green)
+![Version](https://img.shields.io/badge/version-v4.13.0-blue)
+![Release Date](https://img.shields.io/badge/release-2026--08--01-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v1.2.0` ／ **Release Date**: 2026-07-25
+**Version**: `v4.13.0` ／ **Release Date**: 2026-08-01
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約・再ランクスクリプト / RSS-to-Webex News Notifier with LLM Summary & Re-ranking**
 
 カテゴリキーワードに基づいて当日のRSSニュースを並列収集し、重複排除・Claudeによる重要度再ランク・自動要約を行った上で、Webex Bot経由で複数の指定スペースに自動配信する高機能ニュース通知スクリプトです。  
 A Python script that collects today's RSS news in parallel, deduplicates, re-ranks by importance and summarizes using Claude API (LLM), and notifies Webex spaces via Bot.
 
-> **カテゴリ設定は `categories.yml`、フィードリストは `urls.yml`、配信先は `bots.yml` で完全外部管理。Pythonコードを一切書き換えることなく、運用のすべてをカスタマイズできます。**  
-> **Completely managed via YAML configs (`categories.yml`, `urls.yml`, `bots.yml`). You can fully customize feeds, filters, and routing without editing any Python script.**
+> **フィードは `urls.yml`、配信先は `channels.yml`、カテゴリ判定は `categories.yml` で完全外部管理。Pythonコードを一切書き換えることなく、運用のすべてをカスタマイズできます。**  
+> **Completely managed via YAML (`urls.yml` for feeds, `channels.yml` for routing, `categories.yml` for keywords) — no Python edits needed.**
+
+---
+
+## これは何をするもの？ / What is this?
+
+**毎朝、決まった時間に「今日のニュース」を Webex に届けるしくみです。**
+
+ニュースサイトが公開している更新情報（RSS）を自動で集め、内容ごとに仕分けして、Webex の「スペース」に投稿します。人が RSS リーダーを開いて回る作業を、まるごと肩代わりするイメージです。
+
+```
+   ニュースサイト約170か所            このツールがすること              Webex のスペース
+  ┌──────────────┐        ┌────────────────┐      ┌──────────────┐
+  │ Cisco ブログ      │  ──▶  │ 1. 記事を集める      │      │ セキュリティ       │
+  │ セキュリティ系      │  ──▶  │ 2. 重複を除く        │ ──▶ │ ネットワーク       │
+  │ 日本の一般ニュース   │  ──▶  │ 3. 内容ごとに仕分け   │      │ AI・機械学習       │
+  │ 経済ニュース  ほか   │  ──▶  │ 4. 要約して投稿      │      │ 天気とまとめ       │
+  └──────────────┘        └────────────────┘      └──────────────┘
+```
+
+**届くメッセージのイメージ**（実際の投稿例）
+
+> 🗞 **セキュリティ**
+> 🏷 カテゴリ: **セキュリティ**　｜　✅ 15 件　｜　⏱ 2026-08-02 09:01 JST
+>
+> - [Chrome の更新頻度が週2回に　AI によるバグ発見の影響](https://example.com/)　（📅 2026-08-02 02:00 JST）
+>   📝 AI を使った脆弱性調査で見つかる不具合が増え、Google は修正の配信間隔を短くしました。
+>
+> ✅ 今日も一日がんばりましょう。
+
+**うれしいところ**
+
+- **読む場所が1つになる**: サイトを巡回しなくても、Webex を見れば今日の話題が分かります
+- **同じ記事が何度も出ない**: 表現の違う同じニュースは1つにまとめます
+- **話題ごとに分けて届く**: セキュリティの話はセキュリティのスペースへ、といった仕分けができます
+- **要約が付く**（任意）: 長い記事も1〜2文で要点が分かります。英語の記事は日本語に直します
+- **設定は画面から**: ファイルを手で書かなくても、ブラウザの設定画面で用意できます
+
+---
+
+## はじめに知っておく言葉 / Glossary
+
+Python やサーバの知識は要りません。この README に出てくる言葉だけ、先に押さえておくと読みやすくなります。
+
+| 言葉 | どういう意味か |
+|:---|:---|
+| **RSS（フィード）** | ニュースサイトが「新しい記事が出ました」と知らせるための、機械向けの更新情報。多くのサイトが公開しています |
+| **Bot（ボット）** | Webex に自動で投稿するための専用アカウント。人のアカウントとは別に作ります |
+| **スペース** | Webex のグループチャット部屋のこと。ここに Bot が投稿します |
+| **トークン** | Bot が「自分は本物です」と示すための長い文字列。**パスワードと同じ扱い**で、他人に見せません |
+| **Room ID（スペースID）** | スペースを指し示す長い文字列。どの部屋に投稿するかの指定に使います |
+| **カテゴリ** | 記事の仕分け先（セキュリティ、経済など）。キーワードで判定します |
+| **チャンネル** | 「このカテゴリの記事を、このスペースに送る」という配信設定1件のこと |
+| **ダイジェスト** | 天気と、その日に各チャンネルが投稿したニュースのまとめを、1通にした投稿 |
+| **dry-run（ドライラン）** | **実際には投稿せず**、画面で結果だけ確認する練習モード。設定を試すときに使います |
+| **仮想環境（venv）** | このツール専用の Python 置き場。パソコン全体の環境を汚さずに済みます。ウィザードが自動で作ります |
+| **`.env`** | トークンなど、**他人に見せない値**を書いておくファイル。Git には保存されません |
+| **YAML（`.yml`）** | 設定を書くための、人が読みやすい形式のファイル。字下げ（インデント）に意味があります |
+
+> **コマンドの読み方**: この README には `python webex-news-rss-bot.py` のような行が出てきます。これは「ターミナル（Windows はコマンド プロンプト）に打ち込む命令」です。とはいえ、**ふだんの操作はダブルクリックで完結**します（→ [クイックスタート](#クイックスタート--quick-start)）。
 
 ---
 
 ## 目次 / Table of Contents
 
+- [**これは何をするもの？**](#これは何をするもの--what-is-this) ← まずここ
+- [はじめに知っておく言葉 / Glossary](#はじめに知っておく言葉--glossary)
 - [機能 / Features](#機能--features)
 - [動作環境 / Requirements](#動作環境--requirements)
+- [**クイックスタート / Quick Start**](#クイックスタート--quick-start) ← ダブルクリックで設定するウィザード
+- [v1.x から更新する人へ / Upgrading from v1.x](#v1x-から更新する人へ--upgrading-from-v1x) ← 既存ユーザーはここから
 - [セットアップ / Setup](#セットアップ--setup)
+  - [**リポジトリの置き場所**（定時実行するなら必読）](#リポジトリの置き場所--where-to-put-this-repository)
+  - [ステップ 2. 設定ファイルを作る（`.example` の使い方）](#ステップ-2-設定ファイルを作る--create-your-config-files)
+  - [ステップ 3. 最低限の編集](#ステップ-3-最低限の編集--the-minimum-edits)
 - [使い方 / Usage](#使い方--usage)
-- [ルームID確認ツール / Room ID Checker (check_rooms.py)](#ルームid確認ツール--room-id-checker-check_roomspy)
+- [ルームID確認ツール / Room ID Checker（ブラウザUI / CLI）](#ルームid確認ツール--room-id-checker-check_roomspy)
 - [各種設定ファイル / Configuration Files](#各種設定ファイル--configuration-files)
 - [プライベートカテゴリ運用（my-fab パターン）/ Private Category Usage](#プライベートカテゴリ運用my-fab-パターン-private-category-usage)
-- [Claudeによる自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode](#claudeによる自動要約--超エコノミーモード--llm-summarization--eco-mode)
+- [AI による自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode](#ai-による自動要約--超エコノミーモード--llm-summarization--eco-mode)
 - [LLMによるニュース選出（再ランク）/ LLM Re-ranking](#llmによるニュース選出再ランク--llm-re-ranking)
-- [自動実行 / Automation (cron)](#自動実行--automation-cron)
+- [自動実行 / Automation (cron / launchd)](#自動実行--automation-cron--launchd)
 - [macOS の制限と設計上の理由 / macOS Restrictions & Design Rationale](#macos-の制限と設計上の理由--macos-restrictions--design-rationale)
 - [Windows での利用 / Running on Windows](#windows-での利用--running-on-windows)
 - [ファイル構成 / File Structure](#ファイル構成--file-structure)
@@ -39,17 +105,30 @@ A Python script that collects today's RSS news in parallel, deduplicates, re-ran
 
 ## 機能 / Features
 
+**ざっくり言うと、次の4つを毎朝くり返します。**
+
+1. **集める** — 登録した約170のニュースサイトから、24時間以内の記事をまとめて取得します
+2. **整える** — 同じ内容の記事を1つにまとめ、キーワードで「これはセキュリティの話」と仕分けます
+3. **選ぶ** — 1回の投稿が多くなりすぎないよう、重要そうな15件に絞ります
+4. **届ける** — スペースごとに、要約を付けて投稿します
+
+下の表は**細かい仕様の一覧**です。使い始めるだけなら読まなくて構いません。
+気になった機能があるときに、辞書のように引いてください。
+
+<details>
+<summary><b>機能の一覧を開く</b></summary>
+
 | 機能 | 用途・詳細 | Description |
 |:---|:---|:---|
-| **複数RSSの並列取得** | `urls.yml` の約170フィードを **ホスト別に最大12並列** で取得（同一ホスト内はリクエスト間1秒sleepの直列＝サーバへの礼儀は維持）。全体実行時間を大幅短縮 | Parallel fetching (up to 12 host-workers; per-host 1s throttle) |
+| **複数RSSの並列取得** | `urls.yml`（約170フィード）を **ホスト別に最大12並列** で取得（同一ホスト内はリクエスト間1秒sleepの直列＝サーバへの礼儀は維持）。全体実行時間を大幅短縮 | Parallel fetching (up to 12 host-workers; per-host 1s throttle) |
 | **スコアリング型カテゴリフィルタ** | `categories.yml` に定義したキーワードを **必須語(`!`)×3点 + 通常語×1点** でスコア計算、`>=4点`で合格 | Weighted keyword scoring (must×3 + normal×1, threshold 4) |
 | **単語境界マッチ** | 5文字以下の英数字キーワードは `\b` で境界判定（`lan`は `LAN`にマッチするが`plan`にはマッチしない） | Word-boundary regex for short ASCII keywords |
 | **Cisco限定URL深度マッチ** | URLに `cisco` を含む記事のみ URL文字列を判定対象に追加（Google News等の汎用URLによる誤マッチを防止） | URL inclusion limited to cisco domains |
-| **マルチチャンネル配信** | `bots.yml` に基づき、複数Webexスペースへカテゴリ毎に自動配信 | Route different categories to separate spaces |
+| **マルチチャンネル配信** | `channels.yml` に基づき、複数Webexスペースへカテゴリ毎に自動配信 | Route different categories to separate spaces |
 | **優先独占チャンネル** | `priority: true` のチャンネル（Cisco等）は該当記事を他チャンネルから除外して独占配信 | Priority channel claims its articles exclusively |
 | **チャンネル間譲渡 (defers_to)** | 汎用チャンネル（AI・機械学習・世の中 等）から専門チャンネル（セキュリティ/ネットワーク/経済）へ自動譲渡 | Auto-defer articles to more specific channels |
 | **ニッチ優先再配分** | 15件超の混雑チャンネルから、同じ記事が15件以下の余裕チャンネルにも該当する場合、余裕側のみに残して混雑側から除外 | Crowded→spacious redistribution |
-| **ソースベース振り分け (source_groups)** | 記事本文のキーワードではなく「どの RSS フィード由来か」でチャンネルを決定。`urls.yml` の名前付きグループを `bots.yml` の `source_groups` で参照し、そのフィード由来の記事を専有配信（例: Cisco Security Advisories を専用スペースへ隔離） | Route by source feed via named `urls.yml` groups |
+| **ソースベース振り分け (source_groups)** | 記事本文のキーワードではなく「どの RSS フィード由来か」でチャンネルを決定。`feeds:` の名前付きグループを `channels:` の `source_groups` で参照し、そのフィード由来の記事を専有配信（例: Cisco Security Advisories を専用スペースへ隔離） | Route by source feed via named `feeds:` groups |
 | **Cisco Advisory の CVSS 併記（危険度カラー）** | Cisco Security Advisory の記事に、Cisco 公開の構造化データ（CVRF）から取得した実際の **CVSS Base Score** を、深刻度に応じた色付きバッジで表示（🔴 Critical / 🟠 High / 🟡 Medium・Low）。複数スコアは範囲表記＋最大値で色付け（`🔴 CVSS 7.5〜9.1（複数該当）`）。LLM には推測させず実値を取得 | Color-coded CVSS badge for Cisco advisories (fetched from CVRF) |
 | **空チャンネルは無投稿** | 当日に該当ニュースが0件のスペースには、空通知も含め一切投稿しない | Skip posting entirely when a channel has no matching news |
 | **デイリーダイジェスト (digest)** | `digest: true` の専用チャンネルが、全チャンネル配信後に **今日・明日の天気（東京・横浜・千葉・札幌）＋各チャンネルが実際に投稿したニュースのダイジェスト（見出し上位5件）＋🇯🇵日本のニュース枠** を1通に集約して配信。天気は **Open-Meteo**（APIキー不要・無料）。RSS再取得せず、投稿済み結果をメモリから集約するため内容が完全一致 | Daily briefing bot: weather (Open-Meteo, key-less) + digest of what each channel posted + a guaranteed Japanese-news section |
@@ -64,16 +143,24 @@ A Python script that collects today's RSS news in parallel, deduplicates, re-ran
 | **Claude自動要約** | Claude APIで「自然な日本語1〜2文（110字以内）」に要約。**英文RSSは自動で日本語に翻訳** | LLM summary + English→Japanese translation |
 | **超エコノミーモード** | プロンプト圧縮（~22トークン）+ 短い綺麗な日本語概要のスキップ + 要約キャッシュ | Compressed prompt (~22 tokens), skip for short Japanese, in-memory cache |
 | **Dry-runモード** | 送信せずターミナルで取得・要約結果を確認 | Dry-run preview |
+| **初期設定ウィザード** | ダブルクリックで起動し、環境診断→依存導入→トークン検証→配信先設計→設定生成→dry-run まで案内（macOS/Windows 両対応、ブラウザUI と CLI の2方式） | Setup wizard for macOS/Windows (browser UI or CLI) |
 | **launchdデプロイ** | macOSのDocuments保護を回避してホーム直下に同期配置する自動デプロイスクリプト | Auto-deploy script for macOS launchd |
 | **スリープ復帰対応** | `pmset` で毎朝 Mac を自動wakeさせる運用ガイドを完備（launchdがスリープ中は fire しない問題の回避） | `pmset` wake schedule for reliable launchd execution on Mac sleep |
+
+</details>
 
 ---
 
 ## 動作環境 / Requirements
 
-- Python 3.10 以上 / Python 3.10 or later
-- Webex Bot アカウントとアクセストークン / Webex Bot account and access token
-- Anthropic (Claude) API キー (要約機能用・任意) / Anthropic API Key (optional for summaries)
+| 必要なもの | 説明 | 必須 |
+|:---|:---|:---:|
+| **Python 3.10 以上** | 動かすための土台。入っているか分からない場合は、ウィザードが最初に確認して教えてくれます | ✅ |
+| **Webex の Bot** | 投稿用のアカウント。[開発者ポータル](https://developer.webex.com/)の画面から数分で作れます（→ [クイックスタート](#クイックスタート--quick-start)のウィザードが案内します） | ✅ |
+| **投稿先のスペース** | Webex のグループ。作ったら**その部屋に Bot を招待**しておきます | ✅ |
+| **AI の API キー** | 記事の要約に使います。**Claude / OpenAI / Gemini** から選べます。**無くても配信は動きます**（その場合は元の紹介文をそのまま載せます） | — |
+
+> **Python が入っているか分からないときは**、そのままウィザードを起動してください。見つからなければ、入手先を案内します。
 
 ### 依存パッケージ / Python dependencies
 ※詳細は `requirements.txt` を参照 / See `requirements.txt` for details
@@ -84,39 +171,362 @@ A Python script that collects today's RSS news in parallel, deduplicates, re-ran
 
 ---
 
-## セットアップ / Setup
+## クイックスタート / Quick Start
 
-### 1. 仮想環境の有効化とパッケージインストール / Activate venv and install dependencies
+**はじめての人は、ウィザードに任せてください。** clone してダブルクリックするだけで、環境の確認から設定ファイルの作成、動作確認まで進みます。  
+New here? Let the wizard do it — clone, double-click, and follow the steps.
+
+| OS | ダブルクリックするファイル |
+|:---|:---|
+| **macOS** | `はじめに設定する.command` |
+| **Windows** | `はじめに設定する.bat` |
+
+```bash
+# 置き場所は TCC・同期フォルダーの外に（詳細は下の「リポジトリの置き場所」）
+mkdir -p ~/Developer && cd ~/Developer
+git clone <このリポジトリのURL> rss-bot
+# → Finder / エクスプローラーで開き、上記のファイルをダブルクリック
+```
+
+ウィザードがやること:
+
+| ステップ | 内容 |
+|:---:|:---|
+| 0 | **環境の確認** — Python のバージョン、**置き場所**（macOS: TCC 配下か / Windows: OneDrive 配下か）、書き込み権限。あわせて仮想環境の作成と依存パッケージの導入 |
+| 1 | **chat bot の用意** — `.env` に設定済みの bot があれば**一覧から選ぶだけ**。無ければ Webex の作成ページを開いて手順を案内し、発行されたトークンを受け取る |
+| 2 | bot の確認 — トークンの有効性をその場でチェックし、参加中のスペースを取得 |
+| 3 | スペース一覧から配信先を選び、カテゴリを割り当て（**`categories:` を書かずに済む形**で生成） |
+| 4 | 集めるRSSフィードの選択 |
+| 6 | `.env`・`urls.yml`・`channels.yml` を**プレビューしてから**作成（既存ファイルは自動退避） |
+| 6 | 送信せずに `--dry-run` で動作確認 |
+
+**すでに設定がある場合は、それを読み込んで編集できます。** ウィザードは既存の設定を検出すると、現在のフィード一覧と配信先の割り当てを各ステップの初期値として表示します。設定をやり直したいときだけでなく、**フィードの追加・削除や配信先の変更にも使えます**。
+
+| 既存の設定 | ウィザードでの扱い |
+|:---|:---|
+| フィードURL | 一覧に表示され、チェックを外して削除・欄に貼って追加 |
+| 配信先（スペースとカテゴリ） | 現在の割り当てを初期値として表示、変更可 |
+| 天気API・名前付きグループ | **編集せずそのまま引き継ぐ**（画面に明示） |
+| 優先配信・譲渡・ダイジェスト等を持つチャンネル | **編集せずそのまま引き継ぐ**（画面に明示） |
+
+> **上書き前のファイルは自動で退避されます。** `channels.yml.bak-20260802-012412` のように日時つきで同じフォルダに残るので、戻したいときはこれを元の名前に戻してください。退避ファイルには**設定の中身がそのまま入る**ため Git 管理対象外です（`.gitignore` で除外）。溜まってきたら削除して構いません。
+
+> 設定は作り直しになるため、`urls.yml` / `channels.yml` に書いていた**コメントは残りません**（設定内容は保たれます）。元のファイルは `.bak-日時` に自動退避されるので、必要なら戻せます。
+
+> **chat bot は Webex の画面で作ります。** 商用の Webex には bot を作成する API が無く、[開発者ポータル](https://developer.webex.com/my-apps/new/bot)のフォームから作る必要があります（API での作成は FedRAMP 環境限定）。ウィザードは作成ページを開いて手順を示し、発行されたトークンを受け取るところから自動化します。  
+> Bots must be created in the Webex developer portal — there is no bot-creation API in the commercial environment (API creation is FedRAMP-only).
+
+ウィザードは3つのタブに分かれています。設定を作った後も、いつでも開いて編集できます。
+
+| タブ | できること |
+|:---|:---|
+| **設定の全体像** | いまの設定をまとめて確認（規模の指標・チャンネル一覧・**記事の流れ図**・カテゴリの語数・フィード・ダイジェスト・注意点） |
+| **セットアップ** | 環境確認 → chat bot の用意 → **チャンネルごとの設定**（名前・種類・カテゴリ・詳細）→ フィード → 生成 → dry-run |
+| **URL の設定** | 集めるRSSの確認・追加・削除。**名前付きグループ**の編集と新規作成（専有配信の注意つき）。**天気の観測地点**の編集 |
+| **カテゴリの管理** | カテゴリのキーワード編集と、**新規カテゴリの作成**。チャンネル設定とは独立 |
+| **ダイジェスト** | 天気の観測地点（**地名から緯度経度を自動取得**）と、**時事ダイジェストの地域バランス**（日本/米国/その他の件数と判定語） |
+| **要約AI** | 要約・記事選定に使う AI（**Claude / OpenAI / Gemini**）とモデル名の設定。接続を試して確認できる |
+| **自動実行** | 毎朝の実行時刻と曜日を設定（macOS は launchd、Windows はタスク スケジューラに登録） |
+
+スペースごとに**送るものの種類**を選べます。
+
+| 種類 | 内容 |
+|:---|:---|
+| **カテゴリ別のニュース** | 選んだカテゴリの記事を配信（カテゴリは複数可） |
+| **ダイジェスト（天気＋まとめ）** | 毎日の配信後に、**今日・明日の天気**と**各チャンネルが投稿したニュースのまとめ**を1通で配信。観測地点は「URL の設定」タブで編集 |
+
+**チャンネル名は Webex 投稿の見出しになります。** ウィザードでは名前を自由に決められ、送るカテゴリは複数選べます。名前と単一カテゴリが一致するときだけ `categories:` を省略した設定になります。
+
+ブラウザで進める方式と、ターミナルで進める方式を選べます。どちらも同じ設定を作ります。  
+Choose the browser UI or the terminal — both produce the same configuration.
+
+```bash
+python3 setup.py --ui    # ブラウザで設定する
+python3 setup.py --cli   # ターミナルで設定する
+```
+
+> 定時実行（毎朝の自動配信）の登録は、ウィザードにはまだ含まれていません。[自動実行](#自動実行--automation-cron--launchd) の手順で設定してください。
+
+<details>
+<summary><b>ウィザードを使わず手作業で設定する / Manual setup</b></summary>
+
 ```bash
 cd rss-bot
+python3 -m venv .
+source bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env          # Webex トークンと Space ID を書く
+cp urls.yml.example urls.yml           # 集めるフィードを書く
+cp channels.yml.example channels.yml   # 配信先を書く
+
+python webex-news-rss-bot.py --dry-run   # 送信せず確認
+python webex-news-rss-bot.py             # 本番実行
+```
+
+各ファイルの書き方は下の [セットアップ](#セットアップ--setup) を参照してください。
+
+</details>
+
+---
+
+## v1.x から更新する人へ / Upgrading from v1.x
+
+すでに v1.x で運用している場合、設定ファイルの構成が変わっています。**既存の `urls.yml` と `bots.yml` はそのまま残して構いません**（読み込まれなくなるだけです）。
+
+### 1. `config.yml` へ統合する（v2.0.0）
+
+`urls.yml`（フィード）と `bots.yml`（配信先）は `config.yml` の `feeds:` / `channels:` に統合されました。次のコマンドで、コメントを保ったまま変換できます。
+
+```bash
+python3 - << 'EOF'
+from pathlib import Path
+feeds = Path("urls.yml").read_text(encoding="utf-8").splitlines()
+bots = Path("bots.yml").read_text(encoding="utf-8")
+lines = ["feeds:"] + [("  " + l if l.strip() else "") for l in feeds] + ["", ""]
+Path("config.yml").write_text("\n".join(lines) + bots, encoding="utf-8")
+print("config.yml を作成しました")
+EOF
+```
+
+変換したら `python webex-news-rss-bot.py --dry-run` で、これまでと同じ配信内容になることを確認してください。
+
+### 2. `クラウド` カテゴリの置き換え（v3.0.0）
+
+`categories.yml` の `クラウド` は `ネットワーク` に統合されました。`config.yml` に `categories: [クラウド]` と書いている箇所があれば、`ネットワーク` に置き換えてください（AWS/Azure/GCP/Kubernetes などのキーワードは `ネットワーク` 側に入っています）。
+
+### 3. `urls.yml` と `channels.yml` へ分ける（v4.0.0）
+
+編集しやすさのため、`config.yml` は再び2つに分かれました。**`config.yml` のままでも動きます**が、次のコマンドで分割できます。
+
+```bash
+python3 - << 'EOF'
+from pathlib import Path
+lines = Path("config.yml").read_text(encoding="utf-8").splitlines()
+fs = next(i for i, l in enumerate(lines) if l.rstrip() == "feeds:")
+cs = next(i for i, l in enumerate(lines) if l.rstrip() == "channels:")
+Path("urls.yml").write_text("\n".join(lines[fs:cs]).rstrip() + "\n", encoding="utf-8")
+Path("channels.yml").write_text("\n".join(lines[cs:]).rstrip() + "\n", encoding="utf-8")
+print("urls.yml と channels.yml を作成しました")
+EOF
+```
+
+分割後に `python webex-news-rss-bot.py --dry-run` で同じ結果になることを確認してください。`urls.yml` と `channels.yml` があれば `config.yml` は読まれません（消しても構いません）。
+
+### 3. 設定を短くする（任意）
+
+`name` を `categories.yml` のカテゴリ名と同じにすると、`categories:` を省略できます。
+
+```yaml
+# 変更前
+- name: セキュリティニュース
+  webex_space_id: ${WEBEX_SPACE_ID_SECURITY}
+  categories:
+    - セキュリティ
+
+# 変更後（name がカテゴリ名と完全一致するので categories: は不要）
+- name: セキュリティ
+  webex_space_id: ${WEBEX_SPACE_ID_SECURITY}
+```
+
+---
+
+## セットアップ / Setup
+
+### リポジトリの置き場所 / Where to put this repository
+
+**定時実行を使うなら、置き場所で結果が変わります。** 手動実行は成功するのに、スケジューラからの実行だけが無言で失敗する、という形で表面化します。最初に置き場所を決めてください。  
+**Where you clone this matters for scheduled runs.** A bad location fails silently under the scheduler while manual runs succeed.
+
+#### macOS — TCC（プライバシー保護）の対象外に置く
+
+macOS は `~/Documents` `~/Desktop` `~/Downloads` と iCloud Drive 配下を **TCC** で保護しています。`launchd` から起動されたプロセスにはこれらのフォルダへのアクセス権が無いため、**設定ファイルを読めずに失敗します**（ターミナルからの手動実行は、ターミナル自身に許可があるので成功します）。
+
+| 置き場所 | 定時実行（launchd） | 備考 |
+|:---|:---:|:---|
+| `~/Developer/rss-bot` | ✅ 推奨 | TCC 対象外。plist から直接このパスを指定できる |
+| `~/rss-bot` | ✅ | ホーム直下も対象外 |
+| `~/Documents/...`<br>`~/Desktop/...`<br>`~/Downloads/...` | ❌ | TCC でブロックされる。同梱の `deploy_to_launchd.sh` で `~/rss-bot` へ同期する回避策あり |
+| `~/Library/Mobile Documents/...`（iCloud Drive） | ❌ | 同期の実体化タイミングにも依存するため不可 |
+
+> **フルディスクアクセスを付与すれば動かせますが、推奨しません。** バックグラウンド実行のためだけに広い権限を与えることになります。TCC 対象外のフォルダに置く方が安全で確実です。
+
+#### Windows — 同期・保護されるフォルダーを避ける
+
+Windows には macOS の TCC のような一律の制限はなく、タスクスケジューラは任意のフォルダのスクリプトを実行できます。ただし**同じ症状（定時実行だけ失敗）を起こす要因が2つ**あります。
+
+| 要因 | 何が起きるか | 対処 |
+|:---|:---|:---|
+| **OneDrive のフォルダー バックアップ** | `Documents` `Desktop` `Pictures` が OneDrive 配下に移され、パスが `C:\Users\<user>\OneDrive\...` に変わる。「ファイル オンデマンド」でプレースホルダー化されていると、実行時の読み込みが失敗・遅延することがある | 同期対象外のフォルダに置く。置く必要がある場合は対象フォルダを「このデバイス上に常に保持する」に設定 |
+| **Microsoft Defender の「制御されたフォルダー アクセス」** | 有効にしていると、許可していないアプリ（`python.exe`）が `Documents` `Desktop` 配下へ**書き込めず**、`log/` の出力に失敗する | 同機能の対象外フォルダに置くか、`python.exe` を「許可されたアプリ」に追加 |
+
+| 置き場所 | 定時実行（タスクスケジューラ） |
+|:---|:---:|
+| `C:\tools\rss-bot`、`C:\Users\<user>\rss-bot` | ✅ 推奨 |
+| `C:\Users\<user>\OneDrive\...` 配下 | ⚠️ 上記の設定が必要 |
+| ネットワークドライブ（`\\server\share\...`） | ❌ 「ユーザーがログオンしていなくても実行」時にドライブを解決できない |
+
+詳細は [macOS の制限と設計上の理由](#macos-の制限と設計上の理由--macos-restrictions--design-rationale) と [Windows での利用](#windows-での利用--running-on-windows) を参照してください。
+
+---
+
+### ステップ 1. 仮想環境とパッケージ / Virtual environment and dependencies
+
+```bash
+cd rss-bot
+python3 -m venv .          # 初回のみ / first time only
 source bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. 環境変数設定ファイル (`.env`) の作成 / Create `.env` from template
-`.env.example` をコピーして `.env` を作成します。  
-Copy `.env.example` to `.env`:
+> `python3 -m venv .`（ドット）でリポジトリ直下に `bin/` `lib/` が作られます。`python3 -m venv venv` とした場合は、以降のコマンドの `bin/python` を `venv/bin/python` に読み替えてください。
+
+---
+
+### ステップ 2. 設定ファイルを作る / Create your config files
+
+#### `.example` ファイルとは / What the `.example` files are
+
+このリポジトリには、**設定ファイルの見本**が `.example` という拡張子付きで入っています。
+
+- **`.example` 付き**（例: `.env.example`）… Git に入っている**見本**。そのままでは読み込まれません。**編集しないでください**（更新時に上書きされます）。
+- **`.example` を外した名前**（例: `.env`）… プログラムが実際に読む**あなたの設定ファイル**。Git 管理対象外なので、`git pull` しても消えず、あなたのトークンが誤って公開されることもありません。
+
+つまり **「`.example` を外した名前でコピーして、コピーした側を編集する」** のが基本ルールです。  
+**Copy each template to the same filename without `.example`, then edit the copy.**
+
 ```bash
+# 例: .env.example → .env
 cp .env.example .env
 ```
 
-`.env` を開き、各項目に実際の値を設定します。`.env.example` にすべての変数の説明とデフォルト値が記載されています。  
-Open `.env` and fill in your actual values. All variables with descriptions are documented in `.env.example`.
+> **ウィザードを使う場合、この作業は不要です。** bot を用意した時点で、足りない設定ファイルを**ひな形から自動で作ります**（既にあるファイルには触れません）。下のコマンドは、手作業で進めたい場合の手順です。
+
+#### 一括で作る / Create them all at once
+
+```bash
+# 必須 / Required
+cp .env.example .env
+cp urls.yml.example urls.yml
+cp channels.yml.example channels.yml
+
+# 任意（使う機能に応じて）/ Optional
+cp morning_messages.txt.example morning_messages.txt
+cp regions.yml.example regions.yml
+cp categories-private.yml.example categories-private.yml
+
+# 自動実行（macOS launchd）を使う場合のみ / Only for scheduled runs on macOS
+cp run_rssbot.sh.example run_rssbot.sh && chmod +x run_rssbot.sh
+cp webex-news-rss-bot.plist.example webex-news-rss-bot.plist
+```
+
+#### 一覧 / Overview
+
+| テンプレート | コピー先 | 必須 | 何のファイルか | 何を編集するか |
+|:---|:---|:---:|:---|:---|
+| `.env.example` | `.env` | ✅ | 認証情報（トークン・APIキー） | Webex Bot トークンと送信先スペースIDを実際の値に |
+| `urls.yml.example` | `urls.yml` | ✅ | **集めるRSSフィード** | そのままでも動く。読みたいフィードの行を追加・削除 |
+| `channels.yml.example` | `channels.yml` | ✅ | **配信先スペースとカテゴリ** | 使うチャンネルだけ残し、スペースIDとカテゴリを設定 |
+| `morning_messages.txt.example` | `morning_messages.txt` | — | 投稿末尾のランダム署名 | 好きな文言を1行に1つ |
+| `regions.yml.example` | `regions.yml` | — | ダイジェストの地域バランス（日本/米国/その他） | 件数（`quota`）と地域判定キーワード |
+| `categories-private.yml.example` | `categories-private.yml` | — | 社外に出せないキーワードの追加定義 | 自社名などのキーワード |
+| `run_rssbot.sh.example` | `run_rssbot.sh` | — | 自動実行用のラッパー | **編集不要**（`chmod +x` だけ必要） |
+| `webex-news-rss-bot.plist.example` | `webex-news-rss-bot.plist` | — | 自動実行のスケジュール定義 | `__REPO_DIR__` をこのフォルダの絶対パスに置換 |
+
+> **`categories.yml`（カテゴリ判定キーワード）だけは `.example` がありません。** これは Git 管理対象の本体設定で、コピー不要でそのまま使えます。分類を変えたくなったら直接編集してください。  
+> `categories.yml` is tracked in Git — use it as-is, no copy needed.
+
+---
+
+### ステップ 3. 最低限の編集 / The minimum edits
+
+#### 3-1. `.env` — 認証情報（必須）
+
+`.env` を開き、`your_..._here` となっている箇所を実際の値に置き換えます。**まずはこの2つだけで動きます。**
+
+```diff
+- WEBEX_BOT_TOKEN=your_webex_bot_token_here
++ WEBEX_BOT_TOKEN=ZDU4M2Y...（Webex Developer で発行したBotトークン）
+
+- WEBEX_SPACE_ID_AI=your_ai_space_id_here
++ WEBEX_SPACE_ID_AI=Y2lzY29zcGFyazovL3VzL1JPT00v...（送信先スペースのID）
+```
+
+- **Bot トークンの取得**: [Webex Developer Portal](https://developer.webex.com/) で Bot を作成して発行します。
+- **スペースIDの取得**: Bot をスペースに招待したうえで、同梱の `check_rooms.py` を実行すると一覧表示されます（→ [ルームID確認ツール](#ルームid確認ツール--room-id-checker-check_roomspy)）。
 
 | 変数 | 必須 | 説明 |
 |:---|:---:|:---|
 | `WEBEX_BOT_TOKEN` | ✅ | Webex Bot のアクセストークン |
 | `WEBEX_SPACE_ID` | ✅ | 送信先 Webex スペース ID（シングルボットモード） |
-| `WEBEX_SPACE_ID_*` | — | マルチチャンネルモード用 Space ID（`bots.yml` で参照） |
+| `WEBEX_SPACE_ID_*` | — | マルチチャンネルモード用 Space ID（`channels.yml` で参照） |
 | `WEBEX_BOT_TOKEN_*` | — | チャンネル別 Bot トークン（省略時は共通トークンを使用） |
-| `ANTHROPIC_API_KEY` | — | Claude API キー（要約・再ランク機能を使う場合のみ） |
+| `ANTHROPIC_API_KEY` | — | Claude API キー（要約・再ランク機能を使う場合のみ。既定はコメントアウト＝要約なし） |
 | `ANTHROPIC_MODEL` | — | **要約**用モデル名（コード既定: `claude-3-haiku-20240307`。`.env` で新しいモデルに上書き推奨） |
 | `ANTHROPIC_RERANK_MODEL` | — | **再ランク**用モデル名（既定: `claude-haiku-4-5-20251001`） |
 | `SSL_VERIFY` | — | `false` にすると SSL 検証を無効化（社内プロキシ等） |
 | `MYFAB_KEYWORD` 等 | — | プライベートカテゴリ用（my-fab パターン参照） |
 
-> `.env` は `.gitignore` により Git 管理対象外です。絶対にコミットしないでください。  
-> `.env` is excluded by `.gitignore` and must never be committed.
+> **⚠️ `.env` は絶対にコミットしないでください。** `.gitignore` で除外済みですが、内容をチャットや Issue に貼るのも避けてください。  
+> `.env` is gitignored — never commit or paste its contents.
+
+#### 3-2. `urls.yml` と `channels.yml` — フィードと配信先（必須）
+
+設定はこの1ファイルだけです。中身は**2つのセクション**に分かれています。
+
+```yaml
+feeds:                    # ← ① どのRSSを集めるか
+  - https://blogs.cisco.com/feed
+  - https://www.itmedia.co.jp/rss/2.0/news_bursts.xml   # ← こんな風に1行追加
+
+channels:                 # ← ② どこへ何を送るか
+  - name: AI・機械学習                     # カテゴリ名をそのまま名前にすれば categories: は不要
+    webex_space_id: ${WEBEX_SPACE_ID_AI}  # .env の変数名を参照する書き方
+
+  - name: セキュリティ & ネットワーク       # 名前とカテゴリが違うときは categories: を書く
+    webex_space_id: ${WEBEX_SPACE_ID_SECURITY}
+    categories:
+      - セキュリティ                       # categories.yml にあるカテゴリ名を書く
+      - ネットワーク
+```
+
+**① `feeds:` — 収集するRSS（編集は任意）**
+
+コピーしたままで動きます。読みたいサイトを増やしたければ、`  - ` で始まる行を足すだけです。RSS が無いサイトは Google News の検索フィードで代用できます（テンプレート末尾にコメントで例があります）。
+
+**② `channels:` — 配信先（ここは要編集）**
+
+「どのスペースに、どのカテゴリのニュースを送るか」を決めます。テンプレートには2チャンネル分の例が入っています。**使わないチャンネルは丸ごと削除する**のが最も簡単です。
+
+- `webex_space_id` は `${WEBEX_SPACE_ID_AI}` のように書くと `.env` の値を読み込みます（IDを直接書いてもOK）。スペースIDは [ルームID確認ツール](#ルームid確認ツール--room-id-checker-check_roomspy)（ブラウザUIあり）で調べられます。
+- **`.env` にその変数が無い／未設定のチャンネルは、警告を出して自動でスキップ**されます。まずは1チャンネルだけ設定して試すのが安全です。
+- `categories:` に書けるのは `categories.yml` に定義されたカテゴリ名です（既定: `一般` / `経済` / `AI・機械学習` / `セキュリティ` / `ネットワーク` / `Cisco`）。
+- **`categories:` を省略すると、`name` がそのままカテゴリ名として使われます。** カテゴリ名をそのままチャンネル名にするなら `- name: セキュリティ` の1行で済みます。`name` は投稿の見出し・ダイジェスト・`defers_to` の参照名としても従来どおり使われます。
+- `name` が `categories.yml` に無い名前のまま `categories:` を省略した場合は、**警告を出してそのチャンネルをスキップ**します（キーワード無し＝全記事配信、という暴発を防ぐため）。その場合は `categories:` を明示してください。
+- 詳しい書き方（優先度・重複回避・ダイジェスト）は [配信ルール設定 (`channels.yml`)](#1-配信ルール設定-channelsyml--delivery-routing) を参照。
+
+> インデントに注意: `feeds:` / `channels:` の下の項目は**半角スペース2つ**下げて書きます。テンプレートの書き方をそのまま真似るのが確実です。
+
+#### 3-3. 任意ファイル / Optional files
+
+| ファイル | 使うとどうなるか | 編集のしかた |
+|:---|:---|:---|
+| `morning_messages.txt` | 投稿の末尾にランダムな一言が付く | 1行1メッセージで好きなだけ書く |
+| `regions.yml` | ダイジェストのニュースを日本/米国/その他のバランスで選ぶ | `quota` の件数と、地域を判定する `keywords` を調整 |
+| `categories-private.yml` | 社外に出せないキーワードを Git に載せずに追加できる | 自社名などを追記（→ [プライベートカテゴリ運用](#プライベートカテゴリ運用my-fab-パターン-private-category-usage)） |
+
+---
+
+### ステップ 4. 動作確認 / Verify
+
+```bash
+python webex-news-rss-bot.py --dry-run     # 送信せず、収集結果だけ画面表示
+```
+
+`=== 完了 / Done ===` まで進み、記事一覧が表示されれば成功です。問題なければ `--dry-run` を外して本番実行します。  
+If you see the article list and `=== 完了 / Done ===`, you're set — drop `--dry-run` to deliver for real.
+
+毎朝の自動実行まで進めたい場合は [自動実行 / Automation](#自動実行--automation-cron--launchd) へ。
 
 ---
 
@@ -126,8 +536,8 @@ Open `.env` and fill in your actual values. All variables with descriptions are 
 ```bash
 python webex-news-rss-bot.py
 ```
-`bots.yml` に定義されたマルチチャンネルすべてに対して、過去24時間の記事を自動的に収集・要約・配信します。  
-Collects, summarizes, and delivers the last 24 hours of articles to every channel defined in `bots.yml`.
+`channels.yml` に定義されたマルチチャンネルすべてに対して、過去24時間の記事を自動的に収集・要約・配信します。  
+Collects, summarizes, and delivers the last 24 hours of articles to every channel defined in `channels.yml`.
 
 ### ドライラン / Dry-run (テストモード：メッセージ送信せず画面確認のみ / preview without sending)
 ```bash
@@ -147,24 +557,76 @@ python webex-news-rss-bot.py -c "AI・機械学習" --hours 12 --dry-run
 
 ## ルームID確認ツール / Room ID Checker (`check_rooms.py`)
 
-Webex Botが参加しているスペース（ルーム）の「ルーム名」と「Room ID」を一覧でターミナルに出力する補助ツールです。`bots.yml` を設定する際のID調査に利用します。  
-A helper tool that lists the **name** and **Room ID** of every Webex space the Bot has joined. Useful when populating `bots.yml`.
+Webex Botが参加しているスペース（ルーム）の「ルーム名」と「Room ID」を確認する補助ツールです。`channels.yml` の `webex_space_id` を設定する際のID調査に使います。**ブラウザUI版**と**コマンド版**があり、どちらも同じロジックです。  
+Lists the **name** and **Room ID** of every Webex space the Bot has joined — available as a browser UI and as a CLI.
 
-### 実行方法 / How to run
+### 方法A: アイコンをダブルクリック（いちばん簡単）/ Double-click the launcher
+
+リポジトリを開き、お使いの OS のファイルを**ダブルクリック**するだけです。ウィンドウが開いて、ブラウザに UI が表示されます。  
+Just double-click the launcher for your OS — it opens the UI in your browser.
+
+| OS | ダブルクリックするファイル |
+|:---|:---|
+| **macOS** | `起動_スペースID確認UI.command` |
+| **Windows** | `起動_スペースID確認UI.bat` |
+
+- 初回だけ、必要なパッケージ（Streamlit）を**自動でインストール**します（数分かかることがあります）。
+- 止めるときは、開いたターミナルのウィンドウで **Control + C**。
+- ダブルクリックしても開かない場合は、実行権限を付け直してください:
+
+  ```bash
+  chmod +x "起動_スペースID確認UI.command"
+  ```
+
+> `.command` ファイルをブラウザ経由でダウンロードした場合、macOS の Gatekeeper が「開発元を確認できません」と警告することがあります。`git clone` で取得した場合は警告は出ません。警告が出たときは、右クリック →「開く」を選ぶか、下の方法B/Cを使ってください。
+
+### 方法B: ブラウザUI をコマンドで起動 / Browser UI from the CLI
+
+初回のみ追加パッケージを入れます（ニュース配信本体には不要）。  
+One-time install (not needed by the news bot itself):
+
 ```bash
-python check_rooms.py
+./bin/python -m pip install -r requirements-ui.txt
 ```
-実行すると、Webex Botのトークンの入力を求められます。**入力したトークン文字は画面上に一切表示されません（非表示入力）**。  
+
+起動するとブラウザが開きます。  
+Launch — it opens in your browser:
+
+```bash
+./bin/streamlit run check_rooms_ui.py
+```
+
+UI でできること / What you can do:
+
+- **`.env` のトークンを自動検出**して一覧から選ぶ（`WEBEX_BOT_TOKEN` と `WEBEX_BOT_TOKEN_*` の両方に対応。**変数名だけを表示し、値は画面に出しません**）。`.env` が無ければ手入力もできます。
+- スペース一覧を表で表示し、名前で絞り込み（完全一致の切り替えあり）
+- 選んだスペースから **`.env` に貼り付ける行**（`WEBEX_SPACE_ID_XXX=...`）と、**`channels.yml` に書く雛形**を生成
+
+> Bot は**自分が参加しているスペースしか見えません**。目的のスペースが出てこない場合は、Webex 側でそのスペースに Bot を追加してから再取得してください。複数の Bot を使い分けている場合は、UI 上でトークンを切り替えて確認できます。
+
+### 方法C: コマンド版 check_rooms.py / CLI
+
+```bash
+python check_rooms.py                                  # 全スペース一覧
+python check_rooms.py --find "Cisco Security Advisories"  # 名前で絞り込み
+```
+
+実行すると、Webex Botのトークンの入力を求められます（`.env` の `WEBEX_BOT_TOKEN` があればそれを使用）。**入力したトークン文字は画面上に一切表示されません（非表示入力）**。  
 You will be prompted for the Webex Bot token. **Input is hidden** for security.
 
-出力された一覧から必要なルームの `id` をコピーし、`bots.yml` の `webex_space_id` に設定してください。  
-Copy the desired `id` from the output and paste it into `bots.yml`'s `webex_space_id`.
+出力された一覧から必要なルームの `id` をコピーし、`channels.yml` の `webex_space_id` に設定してください。  
+Copy the desired `id` from the output and paste it into `channels.yml`'s `webex_space_id`.
 
 ---
 
 ## 各種設定ファイル / Configuration Files
 
-### 1. 配信ルール設定 (`bots.yml`) / Delivery routing
+ここから先は**各設定ファイルの詳細な書き方**です。最初の1回で必要な作業は [セットアップ](#セットアップ--setup) に集約してあります（`*.example` をコピーして編集するだけ）。この章は、動かした後に「もっと細かく調整したい」と思ったときに読んでください。  
+This chapter is the detailed reference. For first-time setup, the [Setup](#セットアップ--setup) chapter is all you need.
+
+> 以下で `urls.yml` / `channels.yml` などと書いているのは、すべて `*.example` から `.example` を外してコピーした**あなたの設定ファイル**のことです。`*.example` 側は見本なので編集しません。
+
+### 1. 配信ルール設定 (`channels.yml`) / Delivery routing
 どのWebexスペースに、どのカテゴリを配信するかを定義します。本リポジトリの実構成例：  
 Defines which categories are routed to which Webex spaces. The actual configuration used in this repository:
 
@@ -190,6 +652,80 @@ channels:
 
 > Webex Bot トークンは `webex_bot_token` を省略すると `.env` の `WEBEX_BOT_TOKEN` を共通利用します。
 > `${VAR}` 形式の値は実行時に環境変数（`.env`）で展開されます。
+
+#### `name` と `categories` の関係 / How `name` and `categories` relate
+
+`name` はチャンネルの**識別子と表示名を兼ねます**。使われる場所は次の3つです。
+
+1. Webex 投稿の見出し（`🗞️ **世の中ニュース**`）とデイリーダイジェストの各チャンネル見出し
+2. `defers_to: [チャンネル名]` の参照先
+3. `--channel <名前>` で実行対象を絞るときの指定値
+
+**`categories:` を省略すると、`name` がそのままカテゴリ名として使われます（完全一致のみ）。** チャンネル名を `categories.yml` のカテゴリ名と揃えておけば、`categories:` を書く必要がありません。
+
+```yaml
+channels:
+  # ① name がカテゴリ名と完全一致 → categories: は不要
+  - name: セキュリティ
+    webex_space_id: ${WEBEX_SPACE_ID_SECURITY}
+
+  # ② name がカテゴリ名と違う → categories: を明示（name は自由）
+  - name: 世の中ニュース
+    webex_space_id: ${WEBEX_SPACE_ID_GENERAL}
+    categories:
+      - 一般
+```
+
+| `name` | 省略時の扱い |
+|:---|:---|
+| `セキュリティ` | `セキュリティ` を配信（カテゴリ名と完全一致） |
+| `AI・機械学習` | `AI・機械学習` を配信 |
+| `セキュリティニュース` | **スキップ**（完全一致しない）→ `name` を `セキュリティ` にするか `categories:` を明示 |
+| `世の中ニュース` | **スキップ**（同上）→ `categories: [一般]` を明示する |
+
+- 部分一致は採用しません。`name` の一部がたまたまカテゴリ名と重なったときに、意図しないカテゴリまで配信される事故を避けるためです。
+- 見出しとカテゴリ表示が同じ文字列になる場合（上の①）は、投稿ヘッダーの `🏷 カテゴリ:` 行を自動で省き、重複表示を避けます。
+- **完全一致しない場合は、警告を出してそのチャンネルをスキップ**します。キーワードが1つも無い状態＝全記事が通過してしまうため、意図しない大量配信を防ぐ安全策です。`categories:` を明示すれば解決します。
+- `categories: []`（空リストを明示）は従来どおり「カテゴリで絞らない」の意味で、`source_groups` 専用チャンネルや `digest: true` チャンネルで使います。
+
+#### カテゴリ名を変数で管理する / Declaring category names as variables
+
+チャンネル名（`channels.yml`）とカテゴリ名（`categories.yml`）は**完全一致している必要があります**。手で両方を書くとずれるため、`.env` の変数1つに正本を寄せられます。
+
+```bash
+# .env — カテゴリ名の正本はここ1行だけ
+CATEGORY_SECURITY=セキュリティ
+WEBEX_SPACE_ID_SECURITY=Y2lzY29zcGFyazovL3VzL1JPT00v...
+WEBEX_BOT_TOKEN_SECURITY=...        # 省略時は共通の WEBEX_BOT_TOKEN
+```
+
+```yaml
+# channels.yml
+channels:
+  - name: ${CATEGORY_SECURITY}
+    webex_space_id: ${WEBEX_SPACE_ID_SECURITY}
+
+# categories.yml
+${CATEGORY_SECURITY}:
+  - "!セキュリティ"
+  - ランサムウェア
+```
+
+**サフィックス（`SECURITY`）が配列の添字**にあたります。チャンネルを増やすときは、同じサフィックスで変数を足すだけです。カテゴリ名を変えたいときも `.env` の1行を直せば、チャンネル名・カテゴリ定義・投稿見出しが同時に変わるため、**名前がずれる余地がありません**。
+
+- 既定の `${MYFAB_KEYWORD}` もこの仕組みです（社名を公開リポジトリに出さない用途）。
+- **直書き（`name: セキュリティ`）もこれまでどおり動きます。** 変数方式は任意で、混在も可能です。
+- 初期設定ウィザードのステップ5で「カテゴリ名を `.env` の変数で管理する」を選ぶと、`.env`・`config.yml`・`categories.yml` の3つを揃えて生成します（既存の設定を変数方式へ移行することもできます）。
+
+#### 名前の綴り違いを検出する / Name-reference checks
+
+`defers_to` と `source_groups` は**名前で参照**するため、綴りがずれると黙って無効化されます。これを防ぐため、実行時に次を検証します。
+
+| 検出内容 | 動作 |
+|:---|:---|
+| `defers_to` が存在しないチャンネル名を指している | 警告を表示（その譲渡は行われない旨と、定義済みチャンネル名の一覧） |
+| `source_groups` が `feeds:` のグループ名と一致しない | 警告を表示 |
+| 上に加えて `categories: []` のとき | **そのチャンネルをスキップ**（絞り込みが全て外れ、全記事が流れ込むため） |
 
 #### チャンネル間の配信制御 / Cross-channel routing
 
@@ -220,7 +756,7 @@ channels:
 
 #### ソースベース振り分けと Cisco Security Advisories / Source-based routing & CVSS
 
-記事本文のキーワードではなく **「どの RSS フィード由来か」** でチャンネルを決めたい場合は、`urls.yml` に名前付きグループを定義し、`bots.yml` の `source_groups` で参照します。URL の正本は `urls.yml` 側に一本化され、`bots.yml` にはグループ名だけを書きます。
+記事本文のキーワードではなく **「どの RSS フィード由来か」** でチャンネルを決めたい場合は、`urls.yml` に名前付きグループを定義し、`channels.yml` の `source_groups` で参照します。URL の正本は `urls.yml` に一本化され、`channels.yml` にはグループ名だけを書きます。
 
 ```yaml
 # urls.yml — フィードの正本（グループにまとめる）
@@ -230,17 +766,17 @@ channels:
 ```
 
 ```yaml
-# bots.yml — グループ名だけを参照（URL は書かない）
+# channels.yml — グループ名だけを参照（URL は書かない）
 - name: "News Today : Cisco Security Advisories"
   webex_space_id: ${WEBEX_SPACE_ID_CISCO_ADVISORY}
   webex_bot_token: ${WEBEX_BOT_TOKEN_CISCO_ADVISORY}
   priority: true
   source_groups:
-    - cisco-advisory   # urls.yml の group を参照
+    - cisco-advisory   # feeds: の group を参照
   categories: []       # キーワード分類はせず、このグループ由来のみ配信
 ```
 
-- `source_groups` のフィードは `urls.yml` に定義されていれば自動で収集対象になります（別途 `urls.yml` の平文リストに重複して書く必要はありません）。
+- `source_groups` のフィードは `feeds:` に定義されていれば自動で収集対象になります（別途 `feeds:` の平文リストに重複して書く必要はありません）。
 - グループ由来の記事は Phase 1.4 で他の全チャンネルから除外され、この専用スペースにのみ配信されます（セキュリティ等への重複投稿を停止）。
 - `webex_space_id` / `webex_bot_token` の環境変数が未設定（未解決）の間、そのチャンネルは自動的にスキップされます（トークンを後から用意する運用に対応）。
 - URL を直接書きたい場合は `source_groups` の代わりに `source_feeds:`（URL のリスト）も使えます。
@@ -279,7 +815,7 @@ channels:
 3. **📰 時事ダイジェスト（地域バランス）** … `regions.yml` があれば、一般・世の中ニュース（テック/経済/専門カテゴリは除外）から **日本6-7・米国3・その他5** の地域バランスで新着順に選出（下記）。`regions.yml` が無い場合は従来の**🇯🇵 日本のニュース枠**（日本語記事を新着順に最低5件）にフォールバックします。いずれも各チャンネル枠で既出の記事とは重複させません。
 
 ```yaml
-# bots.yml
+# config.yml
 - name: デイリーダイジェスト
   webex_space_id: ${WEBEX_SPACE_ID_DIGEST}
   webex_bot_token: ${WEBEX_BOT_TOKEN_DIGEST}
@@ -389,13 +925,12 @@ Approximate size of each category in this repository's `categories.yml`:
 
 | カテゴリ | 必須語(`!`) | 通常語 | 主な用途 |
 |:---|---:|---:|:---|
-| 一般 | 35 | 31 | 重大な災害・事件・政治イベント |
-| 経済 | 17 | 39 | 値上げ/利上げ/買収/リストラ等の経済動向 |
-| AI・機械学習 | 21 | 22 | OpenAI/Anthropic/Claude/LLM/Agentic AI |
+| 一般 | 35 | 39 | 重大な災害・事件・政治イベント |
+| 経済 | 31 | 26 | 値上げ/利上げ/買収/リストラ等の経済動向 |
+| AI・機械学習 | 22 | 22 | OpenAI/Anthropic/Claude/LLM/Agentic AI |
 | セキュリティ | 26 | 61 | CVE・脆弱性・ランサムウェア・APT等 |
-| ネットワーク | 23 | 60 | SD-WAN/SASE/ZTNA/Wi-Fi/5G/プロトコル |
-| クラウド | 19 | 73 | AWS/Azure/GCP/Kubernetes/データセンター |
-| Cisco | 42 | 108 | Cisco固有ブランド + compound必須語 |
+| ネットワーク | 42 | 128 | SD-WAN/SASE/ZTNA/Wi-Fi/5G/プロトコル ＋ **クラウド**（AWS/Azure/GCP/Kubernetes/データセンター）を統合 |
+| Cisco | 43 | 108 | Cisco固有ブランド + compound必須語 |
 
 ### 3. RSSフィード設定 (`urls.yml`) / RSS feed list
 ニュースの収集元となるRSSフィードURLの一覧を管理します。各要素は **文字列（通常のURL）** または **名前付きグループ** のどちらでも記述できます。  
@@ -406,7 +941,7 @@ Lists the RSS feed URLs to collect articles from. Each item is either a plain UR
 - https://zenn.dev/topics/aiagent/feed
 - https://b.hatena.ne.jp/search/tag?q=AI&mode=rss
 
-# 名前付きグループ（bots.yml の source_groups から参照）
+# 名前付きグループ（channels: の source_groups から参照）
 - group: cisco-advisory
   urls:
     - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
@@ -483,8 +1018,8 @@ If merged successfully, the startup log will show:
 
 ### 方法2: `${VAR}` 環境変数展開 — YAMLに会社名を直書きしない
 
-`categories.yml` や `bots.yml` の中で **`${VAR}` 形式のプレースホルダー** を使うと、実行時に `.env` の値で展開されます。YAML ファイル自体には会社名が含まれないため、そのままリポジトリに公開できます。  
-Use **`${VAR}` placeholders** inside `categories.yml` and `bots.yml`. They are resolved at runtime from `.env`. The YAML files themselves contain no sensitive names and can be safely committed.
+`categories.yml` や `config.yml` の中で **`${VAR}` 形式のプレースホルダー** を使うと、実行時に `.env` の値で展開されます。YAML ファイル自体には会社名が含まれないため、そのままリポジトリに公開できます。  
+Use **`${VAR}` placeholders** inside `categories.yml` and `config.yml`. They are resolved at runtime from `.env`. The YAML files themselves contain no sensitive names and can be safely committed.
 
 #### `categories.yml` での使い方 / Usage in `categories.yml`
 
@@ -530,13 +1065,13 @@ If an env var is undefined, the keyword is skipped with a warning:
 [WARN] categories.yml: 環境変数 ['MY_FAB_KEYWORD1'] が未定義のためキーワード '!${MY_FAB_KEYWORD1}' をスキップ
 ```
 
-#### `bots.yml` での使い方 / Usage in `bots.yml`
+#### `config.yml` での使い方 / Usage in `config.yml`
 
 チャンネル名・Space ID・Bot トークン・カテゴリ名のすべてを `${VAR}` で秘匿できます。  
 Channel name, Space ID, Bot token, and category name can all be hidden with `${VAR}`.
 
 ```yaml
-# bots.yml（公開リポジトリにそのままコミット可）
+# config.yml（公開リポジトリにそのままコミット可）
 channels:
   - name: ${MY_FAB_BRAND}ニュース        # チャンネル名を変数化
     webex_space_id: ${WEBEX_SPACE_ID_MYFAB}
@@ -561,14 +1096,28 @@ WEBEX_BOT_TOKEN_MYFAB=NWQxYmU5ZW...
 |:---|:---|
 | キーワードが多い・将来的に増える | `categories-private.yml` オーバーレイ（YAML として管理しやすい） |
 | 既存カテゴリに数語だけ追加したい | `${VAR}` 展開（別ファイルを作らずに済む） |
-| チャンネル名・Space ID を公開したくない | `bots.yml` の `${VAR}` 展開一択 |
-| 新規チャンネルごと非公開にしたい | 両方の組み合わせ（`bots.yml` で `${VAR}`、キーワードは `categories-private.yml`） |
+| チャンネル名・Space ID を公開したくない | `config.yml` の `${VAR}` 展開一択 |
+| 新規チャンネルごと非公開にしたい | 両方の組み合わせ（`config.yml` で `${VAR}`、キーワードは `categories-private.yml`） |
 
-> **組み合わせ例 / Combined example**: `bots.yml` に `${MY_FAB_BRAND}` でチャンネルを定義し、キーワードは `categories-private.yml` に `${MY_FAB_BRAND}` カテゴリとして書く。`.env` で `MY_FAB_BRAND=自社ブランド` を設定するだけで両方が連動する。
+> **組み合わせ例 / Combined example**: `config.yml` に `${MY_FAB_BRAND}` でチャンネルを定義し、キーワードは `categories-private.yml` に `${MY_FAB_BRAND}` カテゴリとして書く。`.env` で `MY_FAB_BRAND=自社ブランド` を設定するだけで両方が連動する。
 
 ---
 
-## Claudeによる自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode
+## AI による自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode
+
+**使う AI は3つから選べます**（`.env` の `LLM_PROVIDER`、または設定画面の「要約AI」タブ）。
+
+| 選択肢 | `LLM_PROVIDER` | 使うキー | モデル名の例 |
+|:---|:---|:---|:---|
+| Claude（Anthropic） | `anthropic`（既定） | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o-mini` |
+| Gemini（Google） | `gemini` | `GEMINI_API_KEY` | `gemini-2.0-flash` |
+
+モデル名は `ANTHROPIC_MODEL`（要約用）と `ANTHROPIC_RERANK_MODEL`（記事の選定用）に書きます。
+変数名は歴史的に `ANTHROPIC_` で始まりますが、**どの AI を選んだ場合でもこの2つを使います**。
+
+> **何も設定しなければ、これまでどおり Claude として動きます。** 要約自体を使わない場合は、キーを設定しなければ RSS の紹介文がそのまま載ります。
+
 
 本スクリプトは、**Claude API** を用いて収集したニュースの概要を自然な日本語1〜2文（110字以内）に自動要約します。英文RSSは自動で日本語に翻訳されます。APIの課金を抑えるため、以下の**「超エコノミーモード（超節約設計）」**が自動適用されます。  
 This script uses the **Claude API** to summarize each article into 1–2 natural Japanese sentences (≤110 chars). English RSS is auto-translated to Japanese. The following **eco-mode** optimizations are applied automatically to minimize API spend:
@@ -646,14 +1195,37 @@ Re-ranking costs a single API call (max_tokens=200) per over-limit channel — a
 
 ### macOS の場合: launchd (推奨)
 
-> **✅ 推奨構成（v1.1.0〜）: TCC 保護外のパスにリポジトリを置いて直接実行**  
+> **✅ 推奨構成（v1.1.0〜）: TCC 保護外のパスにリポジトリを置いて直接実行**（→ [リポジトリの置き場所](#リポジトリの置き場所--where-to-put-this-repository)）  
 > リポジトリを `~/Developer/rss-bot` のような **TCC 保護対象外のフォルダ**に置く場合、コピーデプロイは不要です。launchd の plist からこのリポジトリの `run_rssbot.sh` を直接指定してください（`run_rssbot.sh` は自身の場所を基準に動作します）。ログはリポジトリ内 `log/` にタイムスタンプ付きで出力されます。  
 > If the repo lives outside TCC-protected folders (e.g. `~/Developer/rss-bot`), point launchd directly at `run_rssbot.sh` — no copy-deploy needed.
+
+**推奨構成の手順 / Steps for the recommended setup**（テンプレートを2つコピーするだけ）
+
+```bash
+# 1. ラッパースクリプト（パス編集は不要。自分の位置から解決する）
+cp run_rssbot.sh.example run_rssbot.sh
+chmod +x run_rssbot.sh
+
+# 2. launchd ジョブ定義（__REPO_DIR__ をこのリポジトリの絶対パスへ置換）
+cp webex-news-rss-bot.plist.example webex-news-rss-bot.plist
+sed -i '' "s|__REPO_DIR__|$(pwd)|g" webex-news-rss-bot.plist
+
+# 3. LaunchAgents へ配置して読み込む
+cp webex-news-rss-bot.plist ~/Library/LaunchAgents/com.webex-news.rssbot.plist
+launchctl unload ~/Library/LaunchAgents/com.webex-news.rssbot.plist 2>/dev/null
+launchctl load   ~/Library/LaunchAgents/com.webex-news.rssbot.plist
+
+# 4. 手動テスト実行
+launchctl start com.webex-news.rssbot
+```
+
+テンプレートの既定は **平日（月〜金）9:01 実行**で、`run_rssbot.sh` は `--weekend-catchup`（月曜のみ72時間分を取得）付きで本体を呼びます。毎日実行にしたい場合は plist の `StartCalendarInterval` を単一 `<dict>` にし、`--weekend-catchup` を外してください。  
+The templates default to weekdays 09:01 with `--weekend-catchup`; edit both files for a daily schedule.
 
 以下は、リポジトリが `~/Documents` など **TCC 保護下にある場合**の従来方式です。macOSのセキュリティ機能により、`Documents` や `Desktop` などの保護されたフォルダ内ではバックグラウンド実行がブロックされてしまう場合があります。そのため、ホームディレクトリ直下 (`~/rss-bot`) に専用の実行環境を構築・同期するデプロイスクリプトを用意しています。
 
 **デプロイスクリプトの実行**
-初めてセットアップする際、およびソースコードや設定ファイル（`bots.yml`等）を更新した後は、ターミナルで以下のスクリプトを実行してください。
+初めてセットアップする際、およびソースコードや設定ファイル（`config.yml`等）を更新した後は、ターミナルで以下のスクリプトを実行してください。
 
 ```bash
 bash deploy_to_launchd.sh
@@ -796,9 +1368,11 @@ The core Python script (`webex-news-rss-bot.py`) uses `os.path` and **runs on Wi
 
 ### Windows でのセットアップ手順 / Setup on Windows
 
+> **置き場所の注意**: `C:\tools\rss-bot` のように、**OneDrive 同期フォルダーと「制御されたフォルダー アクセス」の対象外**に置いてください。`Documents` や `Desktop` 配下は、OneDrive のフォルダー バックアップでパスが変わったり、Defender の設定で `log/` への書き込みが拒否されたりして、**タスクスケジューラからの実行だけが失敗**することがあります。詳細は [リポジトリの置き場所](#リポジトリの置き場所--where-to-put-this-repository) を参照。
+
 #### 1. Python の仮想環境を作成・有効化 / Create and activate venv
 ```powershell
-cd C:\path\to\rss-bot
+cd C:\tools\rss-bot
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -806,14 +1380,29 @@ pip install -r requirements.txt
 
 #### 2. タスクスケジューラへの登録 / Register with Task Scheduler
 
+**同梱の `自動実行を登録.bat` をダブルクリックするのが簡単です。** 管理者権限は不要で、登録・解除・状態確認・今すぐ実行をメニューから選べます。  
+The simplest way: double-click **`自動実行を登録.bat`** (no admin rights needed).
+
+| メニュー | 内容 |
+|:---:|:---|
+| 1 | 平日 09:01 に実行するタスクを登録（タスク名 `rss-bot daily`） |
+| 2 | 登録したタスクを解除 |
+| 3 | 現在の状態を表示 |
+| 4 | 今すぐ1回実行して動作確認 |
+
+登録されるタスクは `run_rssbot.bat` を呼びます。これは macOS の `run_rssbot.sh` に相当するラッパーで、**実行ごとにタイムスタンプ付きログを `log\` に出力**し、スリープ復帰直後などに備えて**投稿先へ疎通できるまで最大5分待って**から本体を起動します。パス編集は不要です。
+
+<details>
+<summary><b>PowerShell で手動登録する場合 / Manual registration with PowerShell</b></summary>
+
 PowerShell から以下のコマンドで、毎日 09:01 に実行するタスクを登録できます。  
 Run the following PowerShell command to register a daily task at 09:01:
 
 ```powershell
 $action  = New-ScheduledTaskAction `
-    -Execute "C:\path\to\rss-bot\venv\Scripts\python.exe" `
-    -Argument "C:\path\to\rss-bot\webex-news-rss-bot.py" `
-    -WorkingDirectory "C:\path\to\rss-bot"
+    -Execute "C:\tools\rss-bot\venv\Scripts\python.exe" `
+    -Argument "C:\tools\rss-bot\webex-news-rss-bot.py" `
+    -WorkingDirectory "C:\tools\rss-bot"
 $trigger = New-ScheduledTaskTrigger -Daily -At "09:01"
 $settings = New-ScheduledTaskSettingsSet -WakeToRun  # スリープ復帰して実行
 Register-ScheduledTask -TaskName "webex-news-rss-bot" `
@@ -823,6 +1412,8 @@ Register-ScheduledTask -TaskName "webex-news-rss-bot" `
 > `-WakeToRun` オプションにより、タスク実行時刻に PC がスリープ中でも自動的に復帰して実行されます（BIOS/UEFI の Wake Timer が有効な場合）。  
 > `-WakeToRun` wakes the PC from sleep at the scheduled time if the BIOS/UEFI Wake Timer is enabled.
 
+</details>
+
 #### 3. 手動テスト実行 / Manual test run
 ```powershell
 python webex-news-rss-bot.py --dry-run
@@ -830,8 +1421,8 @@ python webex-news-rss-bot.py --dry-run
 
 ### 現時点での制限 / Current limitations
 
-- `deploy_to_launchd.sh` に相当する **Windows 用デプロイスクリプト（PowerShell）は現時点では未同梱** です。需要があれば追加予定です。  
-  A Windows equivalent of `deploy_to_launchd.sh` (PowerShell) is **not yet included**. It may be added in a future release.
+- `deploy_to_launchd.sh`（TCC 回避のためのコピー配置）に相当するものは Windows では不要です。Windows には TCC のような制限が無いため、リポジトリをその場に置いたまま `自動実行を登録.bat` で登録できます（同期フォルダーは避けてください）。  
+  No Windows equivalent of `deploy_to_launchd.sh` is needed — Windows has no TCC-style restriction.
 - `.env` の読み込みは `python-dotenv` が担うため、Windows でも動作します。  
   `.env` loading via `python-dotenv` works on Windows without changes.
 
@@ -839,29 +1430,61 @@ python webex-news-rss-bot.py --dry-run
 
 ## ファイル構成 / File Structure
 
+Git に含まれるのはコードとテンプレート（`*.example`）です。`.example` の付かない設定ファイルは各自の環境で作成するもので、Git 管理対象外です（🔒印）。  
+Only code and `*.example` templates are tracked. Files marked 🔒 are gitignored and created by you.
+
 ```text
 rss-bot/
-├── webex-news-rss-bot.py     # メインの実行スクリプト (ニュース収集・要約・配信)
+├── webex-news-rss-bot.py      # メインの実行スクリプト (ニュース収集・要約・配信)
 ├── analyze_filter.py          # フィルタ動作診断ツール (合格/near-miss/不一致を可視化)
-├── check_rooms.py             # Webex ルーム名・ID確認ツール
-├── webex_listener_bot.py      # Webex リスナーBot補助ツール
+├── check_rooms.py             # Webex ルーム名・ID確認ツール（CLI）
+├── check_rooms_ui.py          # 同ツールのブラウザUI版（Streamlit）
+├── setup.py                   # 初期設定ウィザードのブートストラップ（標準ライブラリのみ）
+├── wizard/                    # ウィザード本体（core=共通ロジック / cli=対話版 / app=ブラウザ版）
+├── はじめに設定する.command     # macOS: ダブルクリックで初期設定ウィザードを起動
+├── はじめに設定する.bat         # Windows: ダブルクリックで初期設定ウィザードを起動
+├── 起動_スペースID確認UI.bat    # Windows: ダブルクリックでスペースID確認UIを起動
+├── 自動実行を登録.bat           # Windows: タスクスケジューラへ登録・解除・状態確認
+├── run_rssbot.bat             # Windows: タスクから呼ばれるラッパー（ログ・ネットワーク待ち）
+├── .gitattributes             # 改行コードの固定（.bat は CRLF）
 ├── deploy_to_launchd.sh       # ~/rss-bot へ同期＆launchd登録するデプロイスクリプト
-├── webex-news-rss-bot.plist   # launchd 用 plist テンプレート（com.webex-news.rssbot）
 ├── categories.yml             # キーワードによるカテゴリ分け設定（必須語/通常語）
-├── bots.yml                   # 配信チャンネル・カテゴリ紐付け（priority/defers_to対応）
-├── bots.yml.example           # bots.yml テンプレート
-├── categories-private.yml.example  # 非公開キーワードオーバーレイのテンプレート
-├── urls.yml                   # 取得元RSSフィードURLリスト (約170件)
-├── morning_messages.txt       # 朝メッセージ（投稿末尾のランダム署名）のリスト
 ├── requirements.txt           # 依存ライブラリ一覧
-├── .env                       # 認証情報＆環境変数（Git対象外）
-├── .env.example               # 環境変数のテンプレート
+├── requirements-ui.txt        # ブラウザUI用の追加依存（本体には不要）
 ├── .gitignore                 # Git除外設定
-├── log/                       # 実行ログディレクトリ（launchd_run-YYYYMMDD-HHMMSS.log / launchd_err-YYYYMMDD-HHMMSS.log）
-└── README.md                  # このドキュメント
+├── README.md                  # このドキュメント
+│
+│   # ─ テンプレート / Templates（コピーして使う）─
+├── .env.example               # 認証情報＆環境変数のテンプレート
+├── config.yml.example         # フィード一覧＋配信チャンネルのテンプレート（そのままでも動作）
+├── regions.yml.example        # ダイジェストの地域バランス設定のテンプレート
+├── morning_messages.txt.example    # 朝メッセージ（投稿末尾のランダム署名）のテンプレート
+├── categories-private.yml.example  # 非公開キーワードオーバーレイのテンプレート
+├── run_rssbot.sh.example      # launchd から呼ぶラッパースクリプトのテンプレート
+├── webex-news-rss-bot.plist.example  # launchd 用 plist テンプレート（com.webex-news.rssbot）
+│
+│   # ─ 各自で作成 / Created by you（🔒 Git対象外）─
+├── .env                    🔒 # 認証情報＆環境変数
+├── config.yml              🔒 # フィード一覧（feeds:）＋配信チャンネル（channels:）
+├── regions.yml             🔒 # 時事ダイジェストの地域バランス（任意）
+├── morning_messages.txt    🔒 # 朝メッセージのリスト（任意）
+├── categories-private.yml  🔒 # 非公開キーワードオーバーレイ（任意）
+├── run_rssbot.sh           🔒 # launchd 用ラッパー（自動実行する場合）
+├── webex-news-rss-bot.plist 🔒 # launchd ジョブ定義（自動実行する場合）
+├── *.bak-YYYYMMDD-HHMMSS   🔒 # ウィザードが上書き前に作る退避ファイル（不要なら削除可）
+├── log/                    🔒 # 実行ログ（launchd_run-YYYYMMDD-HHMMSS.log / launchd_err-...log）
+└── bin/ lib/ include/      🔒 # 仮想環境 (python3 -m venv .)
 ```
 
 ### 補助ツール / Auxiliary tools
+
+#### `check_rooms_ui.py` / `check_rooms.py` - スペースID確認
+Webex スペースの一覧・検索と、`.env` / `config.yml` に書く行の生成。ブラウザUI版とCLI版があります（→ [ルームID確認ツール](#ルームid確認ツール--room-id-checker-check_roomspy)）。
+
+```bash
+./bin/streamlit run check_rooms_ui.py   # ブラウザUI（要 requirements-ui.txt）
+./bin/python check_rooms.py --find AI   # CLI
+```
 
 #### `analyze_filter.py` - フィルタ診断
 カテゴリフィルタの動作を可視化する診断スクリプト。各カテゴリで「合格」「あと一歩(near_miss)」「通常語のみマッチ」「完全不一致」の内訳を表示します。
@@ -934,20 +1557,6 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 ---
 
-## 更新履歴 / Version History
-
-| Version | 日付 / Date | 主な変更 / Changes |
-|:---|:---|:---|
-| **v1.2.0** | 2026-07-25 | **デイリーダイジェスト配信と運用安定化 / Daily digest & operational hardening**<br>・**デイリーダイジェスト新設**: `digest: true` の専用チャンネルが、全チャンネル配信後に「今日・明日の天気（東京・横浜・千葉・札幌）＋各チャンネルが実際に投稿したニュースの要約＋🇯🇵日本のニュース枠」を1通に集約して配信。天気は **Open-Meteo**（APIキー不要）。RSS を再取得せず既存1実行に統合<br>・**日本語ニュース下限保証**: `min_japanese: N` で、厳格なキーワードゲートにより日本語記事が減った場合に新着順で補充（ダイジェストの日本枠も最低5件を確保）<br>・**週末キャッチアップ**: `--weekend-catchup` により月曜実行時のみ取得期間を72時間（金土日）へ自動拡張<br>・**ネットワーク準備待ち**: `run_rssbot.sh` がスリープ復帰直後の DNS 未準備によるハングを回避（webexapis.com へ疎通するまで最大5分待機）<br>・**設定の外部化**: 天気APIのURL・観測地点をコード直書きから `urls.yml` へ集約（`weather` エントリ。RSS収集は汚染しない）<br>・**時事ダイジェストの地域バランス**: ダイジェストの日本ニュース枠を、一般・世の中ニュース（テック/経済は除外）から **日本6-7・米国3・その他5** の地域バランスで選ぶ「時事ダイジェスト」枠へ拡張。地域はキーワード判定（米=アメリカ関連語）、不足時は日本優先で補充。キーワード・クオータは `regions.yml` に集約（不在時は従来の日本ニュース枠にフォールバック）<br>・`.env.example` / `bots.yml.example` / `urls.yml.example` / `regions.yml.example` を新設定に追従 |
-| v1.1.0 | 2026-07-13 | **ニュース選出と性能の大型アップデート / Selection & performance overhaul**<br>・**LLM再ランク導入**: 15件超のチャンネルは Claude が重要度順に15件を選定（従来のランダム抽出を置換。失敗時は自動フォールバック）。env `ANTHROPIC_RERANK_MODEL` 追加<br>・**フィード取得の並列化**: ホスト別に最大12並列（同一ホストは1秒間隔を維持）で実行時間を大幅短縮<br>・**重複排除の強化**: 英語タイトルの単語Jaccard判定（⑤）を追加、正規化・bigramの前計算で高速化<br>・**バグ修正**: `_score` が複数チャンネル間で上書きされる問題を修正（チャンネル別に独立スコア化）<br>・**ソースベース振り分け**: `source_groups` / `source_feeds` で特定RSSフィード由来の記事を専用チャンネルへ専有配信（Cisco Security Advisories 分離用）。URL正本は `urls.yml` のグループ定義に一元化<br>・`check_rooms.py` 関数化＋`--find` オプション追加<br>・トレンド語の定期見直し（2026-07-13: ガザ/スーダン/主要語の英語版を追加）<br>・README: TCC保護外パス（例 `~/Developer`）での直接実行を推奨構成として明記 |
-| v1.0.4 | 2026-06-11 | launchd 実行ログをラッパースクリプト経由の**タイムスタンプ付きファイル**に変更（実行ごとに `log/launchd_run-YYYYMMDD-HHMMSS.log` を生成） |
-| v1.0.3 | 2026-06-03 | README に **macOS の制限と設計上の理由**（launchd/TCC）および **Windows での利用**（タスクスケジューラ）セクションを追加 |
-| v1.0.2 | 2026-06-03 | `.env.example` を全変数のドキュメント付きに拡充 |
-| v1.0.1 | 2026-06-03 | MIT LICENSE を追加 |
-| v1.0.0 | 2026-06-03 | 初版リリース: RSS並行収集・スコアリング型カテゴリフィルタ・マルチチャンネル配信（priority/defers_to/ニッチ優先再配分）・漢字bigramハイブリッド重複排除・Claude自動要約（超エコノミーモード）・プライベートカテゴリ運用（my-fabパターン）・launchdデプロイ |
-
----
-
 ### ❌ CISA や community.cisco.com が 403 になる
 * 以前のバージョンではブラウザ風UA（Mozilla/Chrome）を使っており、これらのbot保護サイトで403が出ていました。現バージョンは `rss-bot/1.0` という **フィードリーダ系UA** を採用しており、多くのサイトで改善します。
 * ただし **2026-07 現在、community.cisco.com はフィードリーダ系UAでも403を返す**ことが確認されています（サイト側のbot対策強化）。該当フィードのエラーはスクリプト内で握りつぶされ、他のフィードの収集は継続します。恒久対応（フィードの代替URL化・削除）は検討中です。
@@ -956,3 +1565,49 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 ---
 
 *Developed with ❤️ for webex-news-rss-bot*
+
+---
+
+## 更新履歴 / Version History
+
+各版で**結局なにが変わったか**を1〜2行でまとめています。細かい仕様は本文の該当セクションを参照してください。
+
+| Version | 日付 | 何をしたか |
+|:---|:---|:---|
+| **v4.13.0** | 2026-08-02 | **毎朝の自動実行を画面から設定**できるようにした（時刻・曜日を選ぶだけ。macOS は launchd、Windows はタスク スケジューラへ登録／解除／即時実行）。ブラウザUI・ターミナルの両方に対応。あわせて、**保存前に「何を上書き・追加するか」を一覧で示し、承諾しないと保存できない**ようにした。要約AI を切り替えるときは、他社のキーが設定済みである旨を警告する。 |
+| **v4.12.0** | 2026-08-02 | 設定ファイルが1つも無い状態でも、**bot を用意した時点でひな形から自動生成**するようにした（`.env` / `urls.yml` / `channels.yml` / `regions.yml` / `morning_messages.txt`）。既にあるファイルには触れない。ブラウザUI・ターミナル、macOS・Windows のいずれでも同じように動く。 |
+| **v4.11.0** | 2026-08-02 | 要約に使う AI を **Claude / OpenAI / Gemini から選べる**ようにした。モデル名は自由記述（新しいモデルが出てもそのまま書ける）で、書き方が違えばその場で指摘し、「接続を試す」で実際に使えるか確認できる。**設定していない場合は従来どおり Claude として動く**。 |
+| **v4.10.0** | 2026-08-02 | README を Python 未経験者向けに整理。冒頭に「これは何をするもの？」「用語集」「届くメッセージの例」を追加し、細かい仕様一覧は折りたたみに。更新履歴は各版1〜2行の要約に書き直した。 |
+| **v4.9.1** | 2026-08-02 | 上書き前の退避ファイル（`*.bak-日時`）を Git 管理から明示的に外し、README に戻し方を記載。 |
+| **v4.9.0** | 2026-08-02 | 天気の観測地点を**地名から設定**できるようにした（緯度経度を自動取得）。既存設定にあった座標の誤りも修正。 |
+| **v4.8.0** | 2026-08-02 | 設定画面に「**設定の全体像**」タブを追加。いまの設定・記事の流れ・注意点を1画面で確認できる。 |
+| **v4.7.0** | 2026-08-02 | 設定画面が一部のチャンネル（変数で名前を決めているもの、フィード指定のもの）を正しく読めず、保存すると壊れる不具合を修正。bot とスペースを調べる画面も追加。 |
+| **v4.6.0** | 2026-08-02 | 保存時にスペースIDの変数名が作り替えられ、配信が止まる不具合を修正。スペース一覧とトークンの一括確認を追加。 |
+| **v4.5.1** | 2026-08-02 | bot を切り替えたときに、チャンネル名の欄に前の設定が残る不具合を修正。 |
+| **v4.5.0** | 2026-08-02 | 設定画面を**チャンネル単位**に作り直した。1つのスペースに複数のチャンネルを向けられるようになった。 |
+| **v4.4.0** | 2026-08-02 | 記事の譲り合い（`defers_to`）や日本語記事の下限などの細かい設定と、ダイジェストの**地域バランス**を画面から設定できるようにした。 |
+| **v4.3.0** | 2026-08-02 | Claude（要約）の設定画面を追加。**設定を保存すると他の設定が消えてしまう重大な不具合**を2件修正。 |
+| **v4.2.0** | 2026-08-02 | **天気とまとめを送るチャンネル**を画面から作れるようにした。天気の観測地点も設定可能に。 |
+| **v4.1.0** | 2026-08-02 | 設定画面を3つのタブ（セットアップ／URL／カテゴリ）に整理し、それぞれ独立して編集できるようにした。 |
+| **v4.0.0** | 2026-08-01 | ⚠️ 設定ファイルを用途ごとに分割（`urls.yml` = 集めるフィード、`channels.yml` = 配信先）。**旧 `config.yml` のままでも動く**。 |
+| **v3.5.0** | 2026-08-01 | カテゴリ名を `.env` の変数にまとめられるようにし、チャンネル名とカテゴリ名がずれないようにした。 |
+| **v3.4.0** | 2026-08-01 | ウィザードで**既存の設定を読み込んで編集**できるようにした。触らない設定はそのまま引き継ぐ。 |
+| **v3.3.0** | 2026-08-01 | ウィザードに「chat bot の用意」を追加。設定済みの bot を選ぶか、Webex の作成ページへ案内する。 |
+| **v3.2.0** | 2026-08-01 | Windows 用のバッチ一式（UI起動・定時実行・タスク登録）を用意し、文字化けも修正。 |
+| **v3.1.0** | 2026-08-01 | **初期設定ウィザード**を追加。ダブルクリックで、環境確認から設定作成・動作確認まで案内する。 |
+| **v3.0.0** | 2026-08-01 | ⚠️ `クラウド` カテゴリを `ネットワーク` に統合。あわせて**置き場所**（macOS の保護フォルダ、Windows の同期フォルダ）の注意を明文化。 |
+| **v2.0.2** | 2026-07-31 | Cisco の脆弱性情報に、深刻度が一目で分かる **CVSS スコアのバッジ**を付けた。 |
+| **v2.0.1** | 2026-07-31 | 該当ニュースが0件のスペースには、空の通知も含めて**何も投稿しない**ようにした。 |
+| **v2.0.0** | 2026-07-31 | ⚠️ 設定を `config.yml` に一本化（のち v4.0.0 で再分割）。スペースIDを調べるブラウザUIを追加。チャンネル名がカテゴリ名と同じなら `categories:` を省略できるようにした。 |
+| **v1.2.1** | 2026-07-31 | clone した人がコピーして編集するだけで動くよう、設定のひな形（`*.example`）を全部そろえ、README を初心者向けに整理。 |
+| **v1.2.0** | 2026-07-25 | **デイリーダイジェスト**（天気＋その日の投稿まとめ）を追加。日本語記事の下限保証、月曜の週末キャッチアップも。 |
+| **v1.1.0** | 2026-07-13 | 記事の選び方を改善（Claude が重要度順に選定）。取得を並列化して実行時間を短縮。フィード由来での振り分けにも対応。 |
+| **v1.0.4** | 2026-06-11 | 実行ログを1回ごとの別ファイル（日時つき）に分けた。 |
+| **v1.0.3** | 2026-06-03 | macOS で定時実行が動かない理由と対処、Windows での使い方を README に追記。 |
+| **v1.0.2** | 2026-06-03 | `.env` のひな形に、全項目の説明を書いた。 |
+| **v1.0.1** | 2026-06-03 | MIT ライセンスを追加。 |
+| **v1.0.0** | 2026-06-03 | 初版。RSS の収集・仕分け・重複除去・要約・複数スペースへの配信と、毎朝の自動実行までを実装。 |
+
+> ⚠️ 印は、**それまでの設定のままでは動かない可能性がある変更**です。該当する場合は [v1.x から更新する人へ](#v1x-から更新する人へ--upgrading-from-v1x) を参照してください。
+
+---

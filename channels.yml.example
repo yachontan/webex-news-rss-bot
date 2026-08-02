@@ -1,0 +1,82 @@
+# ============================================================
+# channels.yml.example  —  配信先チャンネルのテンプレート
+#
+# このファイルをコピーして `channels.yml` を作成する / Copy to `channels.yml`:
+#   cp channels.yml.example channels.yml
+# 使わないチャンネルは丸ごと削除してよい（1つだけ残して試すのが簡単）。
+# ============================================================
+
+# ============================================================
+# channels: 配信先 / Delivery channels
+#
+# 「どのWebexスペースに・どのカテゴリを送るか」を定義する。
+# 使わないチャンネルは丸ごと削除してよい（1つだけ残して試すのが簡単）。
+#
+# webex_space_id は `${WEBEX_SPACE_ID_AI}` のように書くと .env の値を読み込む。
+# .env に無い／未設定のチャンネルは、警告を出して自動でスキップされる。
+# スペースIDは `./bin/streamlit run check_rooms_ui.py`（UI）または
+# `python check_rooms.py` で確認できる。
+#
+# categories: に書けるのは categories.yml に定義されたカテゴリ名。
+#   既定: 一般 / 経済 / AI・機械学習 / セキュリティ / ネットワーク / Cisco
+#   （クラウドはネットワークに統合済み。AWS/Azure/GCP/K8s もネットワークで拾う）
+#
+# ★ categories: を省略すると、name をそのままカテゴリ名として使う（完全一致のみ）。
+#   チャンネル名をカテゴリ名と同じにしておけば categories: は不要:
+#     name: セキュリティ      → セキュリティ を配信（categories: 不要）
+#     name: セキュリティニュース → 完全一致しないのでスキップ（categories: を明示する）
+#   部分一致は採らない。name の一部が偶然カテゴリ名と重なったときに、
+#   意図しないカテゴリまで配信される事故を避けるため。
+#   ※ 完全一致しないまま categories: を省略すると、警告を出してそのチャンネルは
+#     スキップされる（キーワード0件＝全記事配信の暴発を防ぐため）。
+#
+# ★ defers_to / source_groups は「名前」で参照する。綴りがずれると黙って無効化される
+#   ため、実行時に検証して警告する（source_groups が解決できず categories: [] の
+#   場合は、全記事が流れ込むのでそのチャンネルをスキップする）。
+# ============================================================
+channels:
+
+  # チャンネル 1: name がカテゴリ名と完全一致するので categories: を省略できる
+  - name: AI・機械学習
+    webex_space_id: ${WEBEX_SPACE_ID_AI}
+    # webex_bot_token: ${WEBEX_BOT_TOKEN_AI}  # 省略時は .env の WEBEX_BOT_TOKEN を使用
+
+  # チャンネル 2: 複数カテゴリをまとめるので categories: を明示（name は自由に付けてよい）
+  - name: セキュリティ & ネットワークニュース
+    webex_space_id: ${WEBEX_SPACE_ID_SECURITY}
+    categories:
+      - セキュリティ
+      - ネットワーク
+      - Cisco
+
+  # チャンネル 3: name がカテゴリ名と違うので categories: が必須
+  #   min_japanese: 確定件数がこの値未満なら、日本語記事（タイトルにひらがな/カタカナを含む）を
+  #   新着順に補充して下限を満たす。厳格なキーワードゲートで日本のニュースが減った場合の保険。
+  # - name: 世の中ニュース
+  #   webex_space_id: ${WEBEX_SPACE_ID_GENERAL}
+  #   min_japanese: 5
+  #   categories:
+  #     - 一般
+
+  # チャンネル 4: 取得元フィードで振り分ける専用スペース（source_groups）
+  #   categories（記事本文キーワード）ではなく「どのフィード由来か」で振り分ける。
+  #   フィードURLは feeds: の group: <名前> に定義し、ここでは名前だけを参照する。
+  #   指定グループ由来の記事はこのチャンネルが専有し、他チャンネルから除外される。
+  #   例: Cisco Security Advisories を専用スペースへ隔離し、セキュリティ等への重複投稿を止める。
+  # - name: "News Today : Cisco Security Advisories"
+  #   webex_space_id: ${WEBEX_SPACE_ID_CISCO_ADVISORY}
+  #   webex_bot_token: ${WEBEX_BOT_TOKEN_CISCO_ADVISORY}
+  #   priority: true
+  #   source_groups:
+  #     - cisco-advisory   # feeds: の group: cisco-advisory を参照
+  #   categories: []       # source_groups のみで振り分け
+
+  # チャンネル 5: デイリーダイジェスト（天気＋各チャンネル投稿ニュースの集約）
+  #   digest: true のチャンネルは自前のカテゴリ収集を行わず、全チャンネル配信後に
+  #   「天気（feeds: の weather 設定）＋各チャンネルの投稿ダイジェスト＋時事ダイジェスト枠」を
+  #   1通に集約して配信する。地域バランスは regions.yml で調整する。
+  # - name: デイリーダイジェスト
+  #   webex_space_id: ${WEBEX_SPACE_ID_DIGEST}
+  #   webex_bot_token: ${WEBEX_BOT_TOKEN_DIGEST}
+  #   digest: true
+  #   categories: []
