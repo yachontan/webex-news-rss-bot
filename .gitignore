@@ -11,7 +11,7 @@
 !README.md
 !requirements.txt
 !requirements-ui.txt
-!categories.yml
+!categories.yml.example
 !urls.yml.example
 !channels.yml.example
 !regions.yml.example
@@ -40,6 +40,7 @@ webex-news-rss-bot.plist
 run_rssbot.sh
 urls.yml
 channels.yml
+categories.yml
 categories-private.yml
 regions.yml
 morning_messages.txt

@@ -161,6 +161,7 @@ CONFIG_TEMPLATES = [
     (ENV_FILE, ENV_EXAMPLE, True),
     (URLS_FILE, REPO_ROOT / "urls.yml.example", True),
     (CHANNELS_FILE, REPO_ROOT / "channels.yml.example", True),
+    (CATEGORIES_FILE, REPO_ROOT / "categories.yml.example", True),
     (REPO_ROOT / "regions.yml", REPO_ROOT / "regions.yml.example", False),
     (REPO_ROOT / "morning_messages.txt", REPO_ROOT / "morning_messages.txt.example", False),
 ]

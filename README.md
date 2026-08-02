@@ -1,11 +1,11 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v4.13.0-blue)
+![Version](https://img.shields.io/badge/version-v4.14.0-blue)
 ![Release Date](https://img.shields.io/badge/release-2026--08--01-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v4.13.0` ／ **Release Date**: 2026-08-01
+**Version**: `v4.14.0` ／ **Release Date**: 2026-08-01
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約・再ランクスクリプト / RSS-to-Webex News Notifier with LLM Summary & Re-ranking**
 
@@ -425,6 +425,7 @@ cp webex-news-rss-bot.plist.example webex-news-rss-bot.plist
 | テンプレート | コピー先 | 必須 | 何のファイルか | 何を編集するか |
 |:---|:---|:---:|:---|:---|
 | `.env.example` | `.env` | ✅ | 認証情報（トークン・APIキー） | Webex Bot トークンと送信先スペースIDを実際の値に |
+| `categories.yml.example` | `categories.yml` | ✅ | **記事を仕分けるキーワード** | そのままでも動く。カテゴリや語を足す |
 | `urls.yml.example` | `urls.yml` | ✅ | **集めるRSSフィード** | そのままでも動く。読みたいフィードの行を追加・削除 |
 | `channels.yml.example` | `channels.yml` | ✅ | **配信先スペースとカテゴリ** | 使うチャンネルだけ残し、スペースIDとカテゴリを設定 |
 | `morning_messages.txt.example` | `morning_messages.txt` | — | 投稿末尾のランダム署名 | 好きな文言を1行に1つ |
@@ -434,7 +435,7 @@ cp webex-news-rss-bot.plist.example webex-news-rss-bot.plist
 | `webex-news-rss-bot.plist.example` | `webex-news-rss-bot.plist` | — | 自動実行のスケジュール定義 | `__REPO_DIR__` をこのフォルダの絶対パスに置換 |
 
 > **`categories.yml`（カテゴリ判定キーワード）だけは `.example` がありません。** これは Git 管理対象の本体設定で、コピー不要でそのまま使えます。分類を変えたくなったら直接編集してください。  
-> `categories.yml` is tracked in Git — use it as-is, no copy needed.
+> `categories.yml` にも雛形があります。仕分けの語は環境ごとに育てるものなので、Git には example だけを置いています。
 
 ---
 
@@ -1448,7 +1449,6 @@ rss-bot/
 ├── run_rssbot.bat             # Windows: タスクから呼ばれるラッパー（ログ・ネットワーク待ち）
 ├── .gitattributes             # 改行コードの固定（.bat は CRLF）
 ├── deploy_to_launchd.sh       # ~/rss-bot へ同期＆launchd登録するデプロイスクリプト
-├── categories.yml             # キーワードによるカテゴリ分け設定（必須語/通常語）
 ├── requirements.txt           # 依存ライブラリ一覧
 ├── requirements-ui.txt        # ブラウザUI用の追加依存（本体には不要）
 ├── .gitignore                 # Git除外設定
@@ -1574,6 +1574,7 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 | Version | 日付 | 何をしたか |
 |:---|:---|:---|
+| **v4.14.0** | 2026-08-02 | 記事を仕分ける `categories.yml` も雛形方式にした。Git には `categories.yml.example` だけを置き、実ファイルは各自の環境で育てる形に変更（ウィザードが自動で作ります）。 |
 | **v4.13.0** | 2026-08-02 | **毎朝の自動実行を画面から設定**できるようにした（時刻・曜日を選ぶだけ。macOS は launchd、Windows はタスク スケジューラへ登録／解除／即時実行）。ブラウザUI・ターミナルの両方に対応。あわせて、**保存前に「何を上書き・追加するか」を一覧で示し、承諾しないと保存できない**ようにした。要約AI を切り替えるときは、他社のキーが設定済みである旨を警告する。 |
 | **v4.12.0** | 2026-08-02 | 設定ファイルが1つも無い状態でも、**bot を用意した時点でひな形から自動生成**するようにした（`.env` / `urls.yml` / `channels.yml` / `regions.yml` / `morning_messages.txt`）。既にあるファイルには触れない。ブラウザUI・ターミナル、macOS・Windows のいずれでも同じように動く。 |
 | **v4.11.0** | 2026-08-02 | 要約に使う AI を **Claude / OpenAI / Gemini から選べる**ようにした。モデル名は自由記述（新しいモデルが出てもそのまま書ける）で、書き方が違えばその場で指摘し、「接続を試す」で実際に使えるか確認できる。**設定していない場合は従来どおり Claude として動く**。 |
