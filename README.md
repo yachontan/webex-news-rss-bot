@@ -447,10 +447,10 @@ cp webex-news-rss-bot.plist.example webex-news-rss-bot.plist
 
 ```diff
 - WEBEX_BOT_TOKEN=your_webex_bot_token_here
-+ WEBEX_BOT_TOKEN=ZDU4M2Y...（Webex Developer で発行したBotトークン）
++ WEBEX_BOT_TOKEN=MhUa0kULmH0Y4XhDSKo0E8W4bRZO…（Webex Developer で発行したBotトークン）
 
 - WEBEX_SPACE_ID_AI=your_ai_space_id_here
-+ WEBEX_SPACE_ID_AI=Y2lzY29zcGFyazovL3VzL1JPT00v...（送信先スペースのID）
++ WEBEX_SPACE_ID_AI=o5XH7lJgMxknri5S1N9LSXglZW14geLK…（送信先スペースのID）
 ```
 
 - **Bot トークンの取得**: [Webex Developer Portal](https://developer.webex.com/) で Bot を作成して発行します。
@@ -696,7 +696,7 @@ channels:
 ```bash
 # .env — カテゴリ名の正本はここ1行だけ
 CATEGORY_SECURITY=セキュリティ
-WEBEX_SPACE_ID_SECURITY=Y2lzY29zcGFyazovL3VzL1JPT00v...
+WEBEX_SPACE_ID_SECURITY=qp2tR6PIKQXYi3lfV5HLpFN8VDzqEbn6M1YDHfi5…
 WEBEX_BOT_TOKEN_SECURITY=...        # 省略時は共通の WEBEX_BOT_TOKEN
 ```
 
@@ -1085,7 +1085,7 @@ channels:
 ```dotenv
 # .env（gitignore済み）
 MY_FAB_BRAND=自社ブランド
-WEBEX_SPACE_ID_MYFAB=Y2lzY29zcGFyazovL3...
+WEBEX_SPACE_ID_MYFAB=lfY5RKwl7i3ijjdhmrN5DkLwnUjHeale…
 WEBEX_BOT_TOKEN_MYFAB=NWQxYmU5ZW...
 ```
 
