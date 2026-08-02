@@ -1,0 +1,53 @@
+#!/bin/bash
+# ============================================================
+# run_rssbot.sh.example  —  launchd から呼び出すラッパースクリプトのテンプレート
+#
+# このファイルをコピーして `run_rssbot.sh` を作成し、実行権限を付ける。
+# Copy to `run_rssbot.sh` and make it executable:
+#   cp run_rssbot.sh.example run_rssbot.sh && chmod +x run_rssbot.sh
+#
+# 役割 / Purpose:
+#   plist は StandardOutPath に動的なファイル名を指定できないため、このラッパーを
+#   経由してタイムスタンプ付きログへリダイレクトする。パスは自分の位置から解決するので
+#   リポジトリをどこに置いても編集不要（TARGET_DIR の書き換えは不要）。
+#   Paths resolve relative to this script, so no editing is required.
+# ============================================================
+
+TARGET_DIR="$(cd "$(dirname "$0")" && pwd)"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+LOG_DIR="$TARGET_DIR/log"
+LOG_FILE="$LOG_DIR/launchd_run-${TIMESTAMP}.log"
+ERR_FILE="$LOG_DIR/launchd_err-${TIMESTAMP}.log"
+
+mkdir -p "$LOG_DIR"
+cd "$TARGET_DIR"
+
+# --- ネットワーク/DNS 準備待ち / Wait for network readiness ---
+# スリープ復帰直後などにネットワーク/DNS が未準備のまま launchd が発火すると、
+# 大量のフィード取得が DNS 解決失敗し、収集が異常遅延・ハングする。
+# 投稿先(webexapis.com)へ疎通できるまで最大5分待ってから本体を起動する。
+# curl は HTTP 応答が返れば(4xx/5xx でも)成功扱い＝DNS+TCP+TLS の疎通確認になる。
+NET_CHECK_HOST="https://webexapis.com"
+MAX_WAIT=300      # 最大待機秒数（5分）
+INTERVAL=10       # 再試行間隔（秒）
+waited=0
+while [ "$waited" -lt "$MAX_WAIT" ]; do
+    if curl -sS --head --max-time 8 "$NET_CHECK_HOST" >/dev/null 2>&1; then
+        echo "[run_rssbot] network ready after ${waited}s ($(date '+%Y-%m-%d %H:%M:%S'))" >> "$LOG_FILE"
+        break
+    fi
+    sleep "$INTERVAL"
+    waited=$((waited + INTERVAL))
+done
+if [ "$waited" -ge "$MAX_WAIT" ]; then
+    echo "[run_rssbot] WARN: network not confirmed after ${MAX_WAIT}s; proceeding anyway ($(date '+%Y-%m-%d %H:%M:%S'))" >> "$LOG_FILE"
+fi
+
+# Python の実行パス / Python interpreter:
+#   リポジトリ直下に venv を作った場合（python3 -m venv .）は "$TARGET_DIR/bin/python"。
+#   venv/ サブディレクトリに作った場合は "$TARGET_DIR/venv/bin/python" に書き換える。
+#
+# --weekend-catchup: 月曜の実行時のみ取得期間を72時間(金土日)に自動拡張する
+#   （平日9時運用のため、月曜は週末の未配信分をまとめて配信）。月曜以外は無効=24h。
+#   毎日実行する運用ならこのフラグは外してよい。
+"$TARGET_DIR/bin/python" "$TARGET_DIR/webex-news-rss-bot.py" --weekend-catchup >> "$LOG_FILE" 2>> "$ERR_FILE"

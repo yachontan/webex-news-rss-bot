@@ -1,26 +1,64 @@
 # ============================================================
-# urls.yml
+# urls.yml.example  —  収集するRSSフィードのテンプレート
 #
-# 収集するRSSフィードのURLリスト / RSS feed URL list
+# このファイルをコピーして `urls.yml` を作成する / Copy to `urls.yml`:
+#   cp urls.yml.example urls.yml
+# そのままでも動きます。読みたいフィードの行を足す・消すだけでOK。
 # ============================================================
-# example <list style>
-# - https://<your rss url1>
-# - https://<your rss url2>
+
+# ============================================================
+# feeds: 収集するRSSフィード / RSS feeds to collect
 #
-# 天気API（任意）/ Weather API (optional):
-#   デイリーダイジェスト（bots.yml の digest: true）で使う天気API設定。
-#   URL・地点の正本を urls.yml に集約し、Python には直書きしない。
-#   RSS ではないため収集対象からは自動除外される（loader が weather を無視）。
-# - weather:
-#     api_url: https://api.open-meteo.com/v1/forecast
-#     locations:
-#       - { label: 東京, lat: 35.6895, lon: 139.6917 }
-#       - { label: 横浜, lat: 35.4437, lon: 139.6380 }
-#
-# 名前付きグループ / Named group (optional):
-#   bots.yml の source_groups から参照する専用フィードをまとめる。
-#   URL の正本を urls.yml に一本化し、bots.yml には URL を書かずグループ名だけ指定する。
-# - group: cisco-advisory
-#   urls:
-#     - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
-#     - https://sec.cloudapps.cisco.com/security/center/csaf_20.xml
+# 要素は次の3形式のいずれか / Each item is one of:
+#   1. 文字列                       : 通常のフィードURL
+#   2. {group: <名前>, urls: [...]} : 名前付きグループ（channels の source_groups から参照）
+#   3. {weather: {...}}             : 天気API設定（RSSではないので収集対象から除外される）
+# ============================================================
+feeds:
+
+  # ── 天気API（任意）/ Weather API (optional) ──
+  #   デイリーダイジェスト（channels の digest: true）で使う。Open-Meteo は APIキー不要。
+  #   ダイジェストを使わない場合はこのブロックごと削除してよい。
+  - weather:
+      api_url: https://api.open-meteo.com/v1/forecast
+      locations:
+        - { label: 東京, lat: 35.6895, lon: 139.6917 }
+        - { label: 横浜, lat: 35.4437, lon: 139.6380 }
+
+  # ── 名前付きグループ（任意）/ Named group (optional) ──
+  #   channels の source_groups から参照する専用フィードをまとめる。
+  #   URL の正本をここに一本化し、channels 側にはグループ名だけを書く。
+  #   ここに入れたフィード由来の記事は、参照したチャンネルが専有する。
+  - group: cisco-advisory
+    urls:
+      - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
+
+  # ── 通常のフィード / Regular feeds ──
+  #   ここから下は自由に編集する。カテゴリ分けは categories.yml のキーワードで行うため、
+  #   フィードをカテゴリごとに並べる必要はない（見出しコメントは見やすさのためだけ）。
+
+  # Cisco
+  - https://blogs.cisco.com/feed
+  - https://gblogs.cisco.com/jp/feed/
+  - https://feeds.feedburner.com/feedburner/Talos
+
+  # セキュリティ / Security
+  - https://feeds.feedburner.com/CiscoBlogSecurity
+  - https://www.cshub.com/rss/news
+
+  # AI・機械学習 / AI & ML
+  - https://openai.com/blog/rss.xml
+  - https://zenn.dev/topics/llm/feed
+  - https://qiita.com/tags/ai/feed.atom
+
+  # テック全般 / Tech
+  - https://www.theverge.com/rss/index.xml
+  - https://www.wired.com/feed/rss
+  - https://www.engadget.com/rss.xml
+
+  # 一般ニュース（日本語）/ General news (Japanese)
+  - https://b.hatena.ne.jp/search/tag?q=AI&mode=rss
+
+  # RSS が無いサイトは Google News 検索フィードで代替できる
+  # Sites without RSS can be covered via Google News search feeds:
+  # - https://news.google.com/rss/search?q=Anthropic&hl=ja&gl=JP&ceid=JP:ja

@@ -3,25 +3,55 @@
 
 # But track these project files / 以下のファイルは追跡する
 !.gitignore
+!.gitattributes
 !LICENSE
 !.env.example
 !webex-news-rss-bot.py
 !analyze_filter.py
 !README.md
 !requirements.txt
-!categories.yml
-!bots.yml.example
+!requirements-ui.txt
+!categories.yml.example
 !urls.yml.example
+!channels.yml.example
 !regions.yml.example
 !check_rooms.py
+!check_rooms_ui.py
+!setup.py
+!wizard/
+!wizard/*.py
+!はじめに設定する.command
+!はじめに設定する.bat
+!起動_スペースID確認UI.bat
+!run_rssbot.bat
+!自動実行を登録.bat
+!起動_スペースID確認UI.command
 !morning_messages.txt.example
 !categories-private.yml.example
+!run_rssbot.sh.example
+!webex-news-rss-bot.plist.example
 !deploy_to_launchd.sh
 
 # Never track secrets or personal configs / シークレット情報等は絶対に追跡しない
+# 実ファイルは各自の環境固有。対応する *.example をコピーして作る。
+# These are per-machine; create them by copying the matching *.example file.
 .env
 webex-news-rss-bot.plist
-categories-private.yml
+run_rssbot.sh
 urls.yml
+channels.yml
+categories.yml
+categories-private.yml
+regions.yml
 morning_messages.txt
 webex_listener_bot.py
+# 旧構成 / Superseded
+bots.yml
+config.yml
+
+# ウィザードが上書き前に作る退避ファイル / Backups made before overwriting
+# 例: .env.bak-20260802-012412、channels.yml.bak-…
+# 設定の中身がそのまま残るため、絶対にコミットしない。不要になったら削除してよい。
+*.bak-*
+*.bak
+*.backup

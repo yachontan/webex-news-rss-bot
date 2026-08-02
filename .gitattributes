@@ -1,0 +1,7 @@
+# 改行コードの固定 / Keep line endings stable across platforms
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.command text eol=lf
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf

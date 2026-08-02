@@ -1,0 +1,9 @@
+# ブラウザUI（check_rooms_ui.py）を使う場合のみ必要 / Only needed for the browser UI
+# インストール / Install:
+#   ./bin/python -m pip install -r requirements-ui.txt
+# 起動 / Launch:
+#   ./bin/streamlit run check_rooms_ui.py
+#
+# ニュース配信本体（webex-news-rss-bot.py）にはこれらは不要です。
+# The news bot itself does not need these packages.
+streamlit>=1.60   # 動作確認 / verified with 1.60.0

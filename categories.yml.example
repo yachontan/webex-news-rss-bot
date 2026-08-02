@@ -1,16 +1,20 @@
 # ============================================================
-# categories.yml
+# categories.yml.example  —  記事を仕分けるキーワードのテンプレート
 #
-# カテゴリキーワード設定ファイル / Category keyword configuration
+# このファイルをコピーして `categories.yml` を作成する / Copy to `categories.yml`:
+#   cp categories.yml.example categories.yml
+# ウィザードを使う場合は自動で作られます。
 #
-# - キーがカテゴリ名（--category オプションで指定する名前）
-# - 値がそのカテゴリにマッチするキーワードのリスト
-# - 大文字・小文字は区別しません（case-insensitive）
+# 書き方 / How it works:
+#   カテゴリ名:
+#     - "!必須語"    ← ! 付き。どれか1つも含まれない記事は配信しない（3点）
+#     - 通常語       ← 補助的な語（1点）
+#   合計 4 点以上でそのカテゴリに仕分けられます。
 #
-# - Keys are category names (used with the --category option)
-# - Values are keyword lists matched against article title/summary/tags
-# - Matching is case-insensitive
+# カテゴリ名を `${VAR}` にすると、`.env` の値で決まります
+# （社名などを公開リポジトリに書かずに済みます。README「プライベートカテゴリ運用」参照）。
 # ============================================================
+
 一般:
   # ── 必須語（!付き）＝「重大な出来事の型」
   # これが1つも無ければ、ただの話題記事として除外
@@ -357,7 +361,7 @@ AI・機械学習:
   - opentelemetry
   - wi-fi 7
   - wifi 7
-  - 802.1
+  - "802.1"           # 802.1X / 802.1Q など
   - private 5g         # ローカル5G
   - ローカル5g
   # ── 通常語：運用・観測
@@ -394,7 +398,8 @@ AI・機械学習:
   - ai agent
   - aiエージェント
 
-クラウド:
+  # ── クラウド関連 / Cloud（旧「クラウド」カテゴリを統合）
+  #    クラウドはネットワークの一部として扱い、1チャンネルで配信する。
   # 必須語（!付き）
   - "!cloud"
   - "!クラウド"
@@ -451,8 +456,6 @@ AI・機械学習:
   - プラットフォームエンジニアリング
   - sre
   - finops
-  - observability
-  - オブザーバビリティ
   # ── 通常語：モデル／形態
   - paas
   - iaas
@@ -491,9 +494,6 @@ AI・機械学習:
   - databricks
   - bigquery
   - redshift
-  - agentic ai
-  - ai agent
-  - aiエージェント
 
 Cisco:
   # ── 必須語: 明確にCisco固有なブランド（単独でも誤マッチが少ない語）
@@ -632,7 +632,7 @@ Cisco:
   - セグメンテーション
   - nac                # Network Access Control
   - opentelemetry
-  - 802.11
+  - "802.11"          # 802.11ax / 802.11be など
   - private 5g         # ローカル5G
   - ローカル5g
   # ── 通常語：運用・観測

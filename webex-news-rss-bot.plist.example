@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ============================================================
+  webex-news-rss-bot.plist.example  —  launchd ジョブ定義のテンプレート
+
+  使い方 / Usage:
+    1. このファイルをコピーする / Copy this file:
+         cp webex-news-rss-bot.plist.example webex-news-rss-bot.plist
+    2. 下の __REPO_DIR__ を、このリポジトリの絶対パスへ置換する（3か所）。
+       Replace __REPO_DIR__ with the absolute path of this repository (3 places).
+       例 / e.g.  /Users/yourname/Developer/rss-bot
+         sed -i '' "s|__REPO_DIR__|$(pwd)|g" webex-news-rss-bot.plist
+    3. LaunchAgents へ配置して読み込む / Install and load:
+         cp webex-news-rss-bot.plist ~/Library/LaunchAgents/com.webex-news.rssbot.plist
+         launchctl unload ~/Library/LaunchAgents/com.webex-news.rssbot.plist 2>/dev/null
+         launchctl load   ~/Library/LaunchAgents/com.webex-news.rssbot.plist
+    4. 手動テスト / Test now:
+         launchctl start com.webex-news.rssbot
+
+  前提 / Prerequisites:
+    - run_rssbot.sh を作成済み（run_rssbot.sh.example をコピーし chmod +x）
+    - リポジトリは TCC 保護対象外のパス（例 ~/Developer/rss-bot、~/rss-bot）に置くこと。
+      ~/Documents ・ ~/Desktop ・ ~/Downloads ・ iCloud Drive 配下だと、launchd から
+      起動されたプロセスに読み取り権限が無く、設定ファイルを開けずに失敗する。
+      （ターミナルからの手動実行は成功するので、定時実行だけ動かない形で表面化する）
+    - 実行ログはラッパー側で log/launchd_run-YYYYMMDD-HHMMSS.log に出力される。
+      ここで指定する StandardOutPath/StandardErrorPath は launchd 自身のエラー用。
+  ============================================================
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.webex-news.rssbot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__REPO_DIR__/run_rssbot.sh</string>
+    </array>
+
+    <!-- 平日（月〜金）9:01 に実行 / Weekdays at 09:01.
+         毎日実行したい場合は、この array を
+         <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
+         の1要素に置き換え、run_rssbot.sh の --weekend-catchup を外す。 -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_DIR__</string>
+
+    <key>StandardErrorPath</key>
+    <string>__REPO_DIR__/log/launchd_boot_err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

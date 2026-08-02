@@ -5,9 +5,14 @@ webex-news-rss-bot.py
 Collects today's RSS news by category keyword and sends notifications via Webex Bot.
 カテゴリキーワードに基づいて当日のRSSニュースを収集し、Webex Bot経由で通知します。
 
+設定ファイル:
+  - urls.yml     : 収集するRSSフィード（天気APIと名前付きグループもここ）
+  - channels.yml : 配信先チャンネル（どのスペースへどのカテゴリを送るか）
+  - categories.yml : カテゴリのキーワード
+
 動作モード / Operation Modes:
-  - マルチチャンネルモード: bots.yml が存在する場合。各チャンネルに個別配信。
-  - シングルボットモード : bots.yml が存在しない場合。--category 引数で制御。
+  - マルチチャンネルモード: channels.yml がある場合。各チャンネルに個別配信。
+  - シングルボットモード : channels: が無い場合。--category 引数で制御。
 """
 
 import feedparser
@@ -38,6 +43,7 @@ load_dotenv(os.path.join(_BASE, ".env"), override=True)
 WEBEX_BOT_TOKEN = os.getenv("WEBEX_BOT_TOKEN", "")
 WEBEX_SPACE_ID  = os.getenv("WEBEX_SPACE_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# 実際に使うキーは LLM_PROVIDER に応じて llm_api_key() で解決する
 ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 # 再ランク（stratified_pick の置き換え）専用モデル。要約用の ANTHROPIC_MODEL とは別枠。
 ANTHROPIC_RERANK_MODEL = os.getenv("ANTHROPIC_RERANK_MODEL", "claude-haiku-4-5-20251001")
@@ -51,8 +57,14 @@ if not SSL_VERIFY:
 # --- ファイルパス定数 / File path constants ---
 
 CATEGORIES_FILE = os.path.join(_BASE, "categories.yml")
-BOTS_FILE       = os.path.join(_BASE, "bots.yml")
+# 設定は用途ごとに分ける（編集しやすさのため）。
+#   urls.yml     : 収集するRSSフィード（feeds:）
+#   channels.yml : 配信先チャンネル（channels:）
+# Config is split by purpose: urls.yml (feeds) and channels.yml (channels).
 URLS_FILE       = os.path.join(_BASE, "urls.yml")
+CHANNELS_FILE   = os.path.join(_BASE, "channels.yml")
+# 旧構成（1ファイルにまとめていた頃）。両方が無い場合の後方互換として読む。
+LEGACY_CONFIG_FILE = os.path.join(_BASE, "config.yml")
 MORNING_MESSAGES_FILE = os.path.join(_BASE, "morning_messages.txt")
 
 # ===========================================================
@@ -75,21 +87,40 @@ def load_random_morning_message(path: str = MORNING_MESSAGES_FILE) -> str:
         print(f"  [WARN] 朝メッセージファイルの読み込みに失敗しました: {e}")
     return ""
 
-def _read_urls_yaml(path: str) -> list:
-    """urls.yml を読み込んで生のリストを返す内部関数。"""
-    if not os.path.exists(path):
-        print(f"[ERROR] RSSフィード設定ファイルが見つかりません: {path}")
-        sys.exit(1)
+def _load_yaml(path: str, label: str):
+    """YAML を読み込んで返す内部関数（解析エラーは停止）。"""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            return yaml.safe_load(f)
     except yaml.YAMLError as e:
-        print(f"[ERROR] urls.yml の解析に失敗しました: {e}")
+        print(f"[ERROR] {label} の解析に失敗しました: {e}")
         sys.exit(1)
-    if not isinstance(data, list):
-        print("[ERROR] urls.yml の形式が正しくありません。リスト形式（- URL）で記述してください。")
-        sys.exit(1)
-    return data
+
+
+def _read_feeds(path: str = URLS_FILE) -> list:
+    """収集するフィードの一覧を返す内部関数。
+
+    受け付ける形式 / Accepted forms:
+      - urls.yml が `feeds:` を持つマップ（現行）
+      - urls.yml がトップレベルのリスト（v1.x の書き方）
+      - urls.yml が無い場合は config.yml の `feeds:`（旧1ファイル構成）
+    """
+    source, label = path, "urls.yml"
+    if not os.path.exists(source):
+        if os.path.exists(LEGACY_CONFIG_FILE):
+            source, label = LEGACY_CONFIG_FILE, "config.yml"
+        else:
+            print(f"[ERROR] フィード設定ファイルが見つかりません: {path}")
+            print("       urls.yml.example をコピーして urls.yml を作成してください。")
+            sys.exit(1)
+
+    data = _load_yaml(source, label)
+    if isinstance(data, list):
+        return data                      # v1.x のリスト形式
+    if isinstance(data, dict) and isinstance(data.get("feeds"), list):
+        return data["feeds"]
+    print(f"[ERROR] {label} に 'feeds:' がありません（リスト形式で記述してください）。")
+    sys.exit(1)
 
 
 def load_urls(path: str = URLS_FILE) -> list[str]:
@@ -97,13 +128,13 @@ def load_urls(path: str = URLS_FILE) -> list[str]:
     urls.yml から収集対象の全RSSフィードURLを平坦なリストで読み込みます。
     Loads all RSS feed URLs (flattened) from urls.yml.
 
-    urls.yml の各要素は次のどちらでもよい:
+    urls.yml の feeds: の各要素は次のどちらでもよい:
       - 文字列                         : 通常のフィードURL
-      - {group: <名前>, urls: [<URL>...]} : 名前付きグループ（bots.yml の
+      - {group: <名前>, urls: [<URL>...]} : 名前付きグループ（channels.yml の
         source_groups から参照される。URL の正本は urls.yml に一本化する用途）
     どちらの形式でも、ここでは収集対象として全URLを平坦化して返す。
     """
-    data = _read_urls_yaml(path)
+    data = _read_feeds(path)
     urls: list[str] = []
     for item in data:
         if not item:
@@ -124,9 +155,9 @@ def load_url_groups(path: str = URLS_FILE) -> dict[str, list[str]]:
     urls.yml 内の名前付きグループを {グループ名: [URL, ...]} で返します。
     Returns named URL groups defined in urls.yml as {group_name: [urls]}.
 
-    bots.yml の source_groups からフィードを URL 直書きせずに参照するために使う。
+    channels.yml の source_groups からフィードを URL 直書きせずに参照するために使う。
     """
-    data = _read_urls_yaml(path)
+    data = _read_feeds(path)
     groups: dict[str, list[str]] = {}
     for item in data:
         if isinstance(item, dict) and item.get("group"):
@@ -152,7 +183,7 @@ def load_weather_config(path: str = URLS_FILE) -> dict | None:
     未定義・不完全な場合は None を返す（デイリーダイジェストは天気ブロックを省略）。
     weather エントリは urls / group キーを持たないため RSS 収集からは無視される。
     """
-    data = _read_urls_yaml(path)
+    data = _read_feeds(path)
     for item in data:
         if not (isinstance(item, dict) and item.get("weather")):
             continue
@@ -232,6 +263,68 @@ def load_regions_config(path: str = REGIONS_FILE) -> dict | None:
 # LLM (Claude) 要約処理 / LLM (Claude) Summarization
 # ===========================================================
 
+# ===========================================================
+# LLM プロバイダ / LLM providers
+# ===========================================================
+# 要約と再ランクは、Claude・OpenAI・Gemini のいずれでも動く。
+# どれを使うかは .env の LLM_PROVIDER で決める（未指定なら anthropic）。
+
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").strip().lower() or "anthropic"
+
+LLM_ENDPOINTS = {
+    "anthropic": "https://api.anthropic.com/v1/messages",
+    "openai": "https://api.openai.com/v1/chat/completions",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/models",
+}
+LLM_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
+
+
+def llm_api_key(provider: str = "") -> str:
+    """使用中のプロバイダに対応する API キーを .env から取得します。"""
+    name = LLM_KEY_ENV.get(provider or LLM_PROVIDER, "ANTHROPIC_API_KEY")
+    return os.getenv(name, "").strip()
+
+
+def call_llm(prompt: str, api_key: str, model: str, max_tokens: int = 140,
+             provider: str = "") -> str:
+    """LLM に1回問い合わせて、返ってきた本文を返します。
+
+    プロバイダごとに URL・ヘッダ・本文の形が違うだけで、やることは同じ。
+    呼び出し側はプロバイダを意識しなくてよい。
+    """
+    name = (provider or LLM_PROVIDER).lower()
+    if name == "openai":
+        url = LLM_ENDPOINTS["openai"]
+        headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
+        payload = {"model": model, "max_completion_tokens": max_tokens,
+                   "messages": [{"role": "user", "content": prompt}]}
+    elif name == "gemini":
+        url = f"{LLM_ENDPOINTS['gemini']}/{model}:generateContent"
+        headers = {"x-goog-api-key": api_key, "content-type": "application/json"}
+        payload = {"contents": [{"parts": [{"text": prompt}]}],
+                   "generationConfig": {"maxOutputTokens": max_tokens}}
+    else:
+        url = LLM_ENDPOINTS["anthropic"]
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                   "content-type": "application/json"}
+        payload = {"model": model, "max_tokens": max_tokens,
+                   "messages": [{"role": "user", "content": prompt}]}
+
+    response = requests.post(url, headers=headers, json=payload, timeout=30, verify=SSL_VERIFY)
+    response.raise_for_status()
+    data = response.json()
+    if name == "openai":
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    if name == "gemini":
+        parts = data["candidates"][0]["content"]["parts"]
+        return "".join(part.get("text", "") for part in parts).strip()
+    return data["content"][0]["text"].strip()
+
+
 def summarize_with_claude(title: str, summary: str, api_key: str, model: str = "claude-3-haiku-20240307", is_advisory: bool = False) -> str:
     """
     Claude API を使用して記事を要約します。
@@ -243,13 +336,6 @@ def summarize_with_claude(title: str, summary: str, api_key: str, model: str = "
     """
     if not api_key:
         return summary
-
-    url = "https://api.anthropic.com/v1/messages"
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
 
     # 圧縮プロンプト: 主要制約を最短で記述（約45トークン）
     # - ラベル/前置き禁止: タイトル：/概要：等を防止
@@ -272,25 +358,10 @@ def summarize_with_claude(title: str, summary: str, api_key: str, model: str = "
             f"T: {title}\nS: {summary}"
         )
 
-    payload = {
-        "model": model,  # 指定されたClaudeモデルを使用
-        "max_tokens": 140,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
-    }
-    
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15, verify=SSL_VERIFY)
-        response.raise_for_status()
-        res_data = response.json()
-        content = res_data["content"][0]["text"].strip()
-        return content
+        return call_llm(prompt, api_key, model, max_tokens=140)
     except Exception as e:
-        body_str = ""
-        if 'response' in locals() and hasattr(response, 'text'):
-            body_str = f" / レスポンス内容: {response.text[:500]}"
-        print(f"    [WARN] Claudeによる要約に失敗しました: {e}{body_str}。元の概要を使用します。")
+        print(f"    [WARN] 要約に失敗しました（{LLM_PROVIDER}）: {e}。元の概要を使用します。")
         return summary
 
 def summarize_entries_in_place(entries: list[dict], api_key: str, cache: dict, model: str = "claude-3-haiku-20240307") -> None:
@@ -788,21 +859,42 @@ def load_categories(path: str = CATEGORIES_FILE) -> dict[str, list[str]]:
     return result
 
 
-def load_bots(path: str = BOTS_FILE) -> list[dict]:
+def resolve_categories_from_name(name: str, category_keywords: dict[str, list[str]]) -> list[str]:
     """
-    bots.yml からマルチチャンネル設定を読み込みます。
-    ファイルが存在しない場合は空リストを返します（シングルボットモード）。
-    Loads multi-channel configs from bots.yml.
-    Returns [] if the file doesn't exist (single-bot mode).
+    チャンネル名から categories.yml のカテゴリ名を解決します（categories: 省略時に使用）。
+    Resolves the category name from a channel name (used when `categories:` is omitted).
+
+    **完全一致のみ**。name が categories.yml のカテゴリ名そのものである場合だけ採用する。
+    Exact match only — the channel name must equal a category name in categories.yml.
+      例: "セキュリティ"     → ["セキュリティ"]
+          "セキュリティニュース" → []  （呼び出し側でスキップし、categories: の明示を促す）
+
+    部分一致を採らないのは、name の一部が偶然カテゴリ名と重なったときに
+    意図しないカテゴリが配信される事故を避けるため。
     """
-    if not os.path.exists(path):
-        return []
+    n = (name or "").strip()
+    return [n] if n and n in category_keywords else []
+
+
+def load_bots(path: str = CHANNELS_FILE) -> list[dict]:
+    """
+    channels.yml の channels: セクションからマルチチャンネル設定を読み込みます。
+    ファイルが無い、または channels: が無い場合は空リスト＝シングルボットモード。
+    Loads multi-channel configs from the `channels:` section of channels.yml.
+    Returns [] if the file or the section is absent (single-bot mode).
+
+    channels.yml が無い場合は、旧1ファイル構成の config.yml も読む（後方互換）。
+    """
+    source = path
+    if not os.path.exists(source):
+        if os.path.exists(LEGACY_CONFIG_FILE):
+            source = LEGACY_CONFIG_FILE
+        else:
+            return []
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        data = _load_yaml(source, os.path.basename(source))
         if not isinstance(data, dict) or "channels" not in data:
-            print("[ERROR] bots.yml の形式が正しくありません。'channels:' キーが必要です。")
-            sys.exit(1)
+            return []  # channels: が無い = シングルボットモード
         channels = data.get("channels") or []
         # 環境変数の展開と必須フィールドの検証 / Expand env vars and validate required fields
         for i, ch in enumerate(channels):
@@ -812,7 +904,7 @@ def load_bots(path: str = BOTS_FILE) -> list[dict]:
             if "name" in ch and isinstance(ch["name"], str) and '$' in ch["name"]:
                 resolved_name = os.path.expandvars(ch["name"])
                 if '$' in resolved_name:
-                    print(f"  [WARN] bots.yml channel[{i}]: name '{ch['name']}' に未定義の環境変数があります")
+                    print(f"  [WARN] channels.yml channel[{i}]: name '{ch['name']}' に未定義の環境変数があります")
                 else:
                     ch["name"] = resolved_name
             # webex_space_id / webex_bot_token の ${VAR} を .env から展開する。
@@ -822,7 +914,7 @@ def load_bots(path: str = BOTS_FILE) -> list[dict]:
             if "webex_space_id" in ch and isinstance(ch["webex_space_id"], str):
                 expanded = os.path.expandvars(ch["webex_space_id"])
                 if "${" in expanded:
-                    print(f"  [WARN] bots.yml channel[{i}] ({ch.get('name','?')}): webex_space_id の環境変数が未解決です → このチャンネルはスキップされます")
+                    print(f"  [WARN] channels.yml channel[{i}] ({ch.get('name','?')}): webex_space_id の環境変数が未解決です → このチャンネルはスキップされます")
                     expanded = ""
                     ch["_skip_reason"] = "webex_space_id 未設定（環境変数が未解決）"
                 ch["webex_space_id"] = expanded
@@ -842,22 +934,32 @@ def load_bots(path: str = BOTS_FILE) -> list[dict]:
                         resolved = os.path.expandvars(cat_str)
                         # 未展開の ${VAR} が残っていれば警告
                         if '$' in resolved:
-                            print(f"  [WARN] bots.yml channel[{i}] ({ch.get('name','?')}): categories の '{cat_str}' に未定義の環境変数があります")
+                            print(f"  [WARN] channels.yml channel[{i}] ({ch.get('name','?')}): categories の '{cat_str}' に未定義の環境変数があります")
                             continue
                         expanded_cats.append(resolved)
                     else:
                         expanded_cats.append(cat_str)
                 ch["categories"] = expanded_cats
 
+            # categories を書かなかったチャンネルは、name をそのままカテゴリ名として使う。
+            # 例: `- name: セキュリティ` だけで categories: [セキュリティ] と同じ意味になる。
+            # （name はこれまでどおり投稿見出し・ダイジェスト・defers_to の識別子でもある）
+            # categories: [] と明示した場合は「全カテゴリ / source_groups 専用」の意味なので対象外。
+            # name が categories.yml に無い名前だと全記事が通ってしまうため、
+            # 実際の採用可否は main 側でカテゴリ定義と突き合わせて判定する。
+            if "categories" not in ch:
+                ch["categories"] = [str(ch.get("name", "")).strip()]
+                ch["_categories_from_name"] = True
+
             # webex_space_id キー自体が無い場合のみ設定ミスとして停止する。
             # キーはあるが環境変数が未解決（_skip_reason 付き）の場合は、
             # 停止せず実行時にそのチャンネルだけスキップする。
             if "webex_space_id" not in ch:
-                print(f"[ERROR] bots.yml の channel[{i}] ({ch.get('name', '?')}) に webex_space_id がありません。")
+                print(f"[ERROR] channels.yml の channel[{i}] ({ch.get('name', '?')}) に webex_space_id がありません。")
                 sys.exit(1)
         return channels
     except yaml.YAMLError as e:
-        print(f"[ERROR] bots.yml の解析に失敗しました: {e}")
+        print(f"[ERROR] channels.yml の解析に失敗しました: {e}")
         sys.exit(1)
 
 
@@ -869,7 +971,7 @@ def _parse_entry(entry, source_feed: str = "") -> dict | None:
     """feedparser のエントリを辞書に変換します。日時情報がない場合は None を返します。
 
     source_feed には、このエントリを取得した RSS フィードの URL を記録する。
-    後段のソースベース振り分け（bots.yml の source_feeds）で、記事本文のキーワードで
+    後段のソースベース振り分け（channels.yml の source_feeds）で、記事本文のキーワードで
     はなく「どのフィード由来か」でチャンネルを決めるために使う。
     """
     if hasattr(entry, "published_parsed") and entry.published_parsed:
@@ -1358,24 +1460,10 @@ def rerank_with_llm(
         "基準: ①読者の業務への関連度 ②影響の大きさ・新規性 ③同種話題ばかりにならない多様性。"
     )
 
-    url = "https://api.anthropic.com/v1/messages"
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "max_tokens": 200,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30, verify=SSL_VERIFY)
-        response.raise_for_status()
-        text = response.json()["content"][0]["text"].strip()
+        text = call_llm(prompt, api_key, model, max_tokens=200)
     except Exception as e:
-        print(f"    [WARN] LLM再ランクのAPI呼び出しに失敗: {e}")
+        print(f"    [WARN] LLM再ランクのAPI呼び出しに失敗（{LLM_PROVIDER}）: {e}")
         return None
 
     # 応答テキストから最初の JSON 配列を抽出
@@ -1574,9 +1662,14 @@ def process_channel(
     if digest_collector is not None and filtered:
         digest_collector[channel_name] = list(filtered)
 
+    # 表示名を categories から生成した場合、見出しとカテゴリ表示が同じ文字列になる。
+    # その場合は「🏷 カテゴリ」を省いて重複表示を避ける。
+    meta = f"✅ {len(filtered)} 件　｜　⏱ {now_jst.strftime('%Y-%m-%d %H:%M')} JST"
+    if cat_label != channel_name:
+        meta = f"🏷 カテゴリ: **{cat_label}**　｜　" + meta
     header = (
         f"🗞️ **{channel_name}**\n"
-        f"🏷 カテゴリ: **{cat_label}**　｜　✅ {len(filtered)} 件　｜　⏱ {now_jst.strftime('%Y-%m-%d %H:%M')} JST\n"
+        f"{meta}\n"
         f"{'─' * 40}"
     )
 
@@ -1772,7 +1865,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "RSS to Webex Bot: カテゴリ別ニュース通知 / Category-based RSS news notifier\n"
-            f"モード: {'マルチチャンネル (bots.yml)' if multi_mode else 'シングルボット'}"
+            f"モード: {'マルチチャンネル (channels.yml channels:)' if multi_mode else 'シングルボット'}"
         )
     )
     if not multi_mode:
@@ -1801,10 +1894,10 @@ def main() -> None:
                         help="時間内0件のフィードから最新N件を追加（デフォルト: 3、0で無効）")
     parser.add_argument("--categories-file", default=CATEGORIES_FILE,
                         help=f"カテゴリ設定ファイルのパス（デフォルト: {CATEGORIES_FILE}）")
-    parser.add_argument("--bots-file", default=BOTS_FILE,
-                        help=f"マルチチャンネル設定ファイルのパス（デフォルト: {BOTS_FILE}）")
     parser.add_argument("--urls-file", default=URLS_FILE,
-                        help=f"RSSフィードURL設定ファイルのパス（デフォルト: {URLS_FILE}）")
+                        help=f"収集するフィードの設定ファイル（デフォルト: {URLS_FILE}）")
+    parser.add_argument("--channels-file", default=CHANNELS_FILE,
+                        help=f"配信先チャンネルの設定ファイル（デフォルト: {CHANNELS_FILE}）")
     args = parser.parse_args()
 
     # カスタムファイルパスが指定された場合は再読み込み
@@ -1814,13 +1907,40 @@ def main() -> None:
     regions_cfg = load_regions_config()  # 時事ダイジェストの地域バランス（regions.yml に集約）
     if args.categories_file != CATEGORIES_FILE:
         category_keywords = load_categories(args.categories_file)
-    if args.bots_file != BOTS_FILE:
-        channels = load_bots(args.bots_file)
+    if args.channels_file != CHANNELS_FILE:
+        channels = load_bots(args.channels_file)
         multi_mode = len(channels) > 0
 
-    # bots.yml の source_groups（urls.yml のグループ名参照）を実URLへ解決し、
+    # categories を省略したチャンネルは、name を categories.yml のカテゴリ名として解決する。
+    # 完全一致のみ（name がカテゴリ名そのものであること）。一致しないとキーワード0件＝
+    # 全記事が通過してしまうため、その場合は配信せずスキップして設定ミスを知らせる。
+    for ch in channels:
+        if not ch.get("_categories_from_name"):
+            continue
+        name = str(ch.get("name") or "")
+        resolved_cats = resolve_categories_from_name(name, category_keywords)
+        if resolved_cats:
+            ch["categories"] = resolved_cats
+        else:
+            print(f"  [WARN] channels.yml channel ({name}): name が categories.yml の"
+                  f"カテゴリ名と完全一致しません → このチャンネルはスキップされます")
+            print(f"         name をカテゴリ名と同じにするか、categories: を明示してください。"
+                  f"（定義済み: {list(category_keywords.keys())}）")
+            ch["_skip_reason"] = f"name '{name}' が categories.yml のカテゴリ名と一致しない（categories: を明示してください）"
+
+    # defers_to / source_groups の参照先は名前で解決するため、綴りが違うと
+    # 黙って無視される（＝譲渡が効かない）。設定ミスに気づけるよう検証する。
+    known_names = {str(c.get("name") or "") for c in channels}
+    for ch in channels:
+        missing = [str(t) for t in (ch.get("defers_to") or []) if str(t) not in known_names]
+        if missing:
+            print(f"  [WARN] channels.yml channel ({ch.get('name','?')}): defers_to の {missing} は "
+                  f"存在しないチャンネル名です → この譲渡は行われません")
+            print(f"         定義済みのチャンネル名: {sorted(known_names)}")
+
+    # channels.yml の source_groups（urls.yml のグループ名参照）を実URLへ解決し、
     # チャンネルの source_feeds に反映する。URL の正本は urls.yml 側に一本化され、
-    # bots.yml にはグループ名だけを書けばよい。
+    # channels.yml にはグループ名だけを書けばよい。
     for ch in channels:
         groups = ch.get("source_groups") or []
         if not groups:
@@ -1830,11 +1950,21 @@ def main() -> None:
             g = str(g).strip()
             urls = url_groups.get(g)
             if not urls:
-                print(f"  [WARN] bots.yml channel ({ch.get('name','?')}): source_groups の '{g}' が urls.yml に見つかりません")
+                print(f"  [WARN] channels.yml channel ({ch.get('name','?')}): source_groups の '{g}' が urls.yml に見つかりません")
                 continue
             resolved.extend(urls)
         existing = ch.get("source_feeds") or []
         ch["source_feeds"] = list(dict.fromkeys(existing + resolved))
+
+        # source_groups 専用チャンネル（categories: [] ＝ カテゴリで絞らない）で
+        # グループ名が1つも解決できないと、絞り込みが全て外れて全記事が流れ込む。
+        # 設定ミスでスペースを埋め尽くさないよう、配信せずスキップする。
+        if not ch["source_feeds"] and not (ch.get("categories") or []):
+            print(f"  [WARN] channels.yml channel ({ch.get('name','?')}): source_groups が1つも解決できず "
+                  f"categories も空です → 全記事が流れ込むため、このチャンネルはスキップされます")
+            print(f"         feeds: 側の group 名と綴りを揃えてください。"
+                  f"（定義済みグループ: {sorted(url_groups.keys())}）")
+            ch["_skip_reason"] = "source_groups が解決できず categories も空（全記事配信になるため停止）"
 
     # シングルボットモードの事前チェック
     if not multi_mode and not WEBEX_BOT_TOKEN:
@@ -1972,7 +2102,7 @@ def main() -> None:
                 print(f"  ▷ {name}: {before} 件 → {after} 件（{before - after} 件を専用チャンネルへ）")
 
         # Phase 1.5: 「優先チャンネル独占配信」
-        # bots.yml で priority: true が指定されたチャンネルは、そのチャンネルにマッチする
+        # channels.yml で priority: true が指定されたチャンネルは、そのチャンネルにマッチする
         # 記事を他チャンネルから除外し、独占的に配信する。
         # Cisco や my-fab のような専門カテゴリで、混雑チャンネル(AI/セキュリティ等)に
         # 流れてランダム抽出で消える事態を防ぐ。
@@ -2005,7 +2135,7 @@ def main() -> None:
                 print(f"  ▷ {name}: {before} 件 → {after} 件（{before - after} 件を優先チャンネルへ）")
 
         # Phase 1.6: 「defers_to による譲渡」
-        # bots.yml で defers_to: [チャンネル名] が指定されているチャンネルは、
+        # channels.yml で defers_to: [チャンネル名] が指定されているチャンネルは、
         # 自分の記事のうち、指定した譲渡先チャンネルにも該当する記事を
         # そちらに譲って自分の枠から除外する。
         # 例: AI・機械学習 defers_to: [セキュリティ, ネットワーク]
@@ -2120,7 +2250,7 @@ def main() -> None:
                 continue
 
             if not bot_token:
-                print(f"  [SKIP] {ch_name}: bot_token が未設定です (.env の WEBEX_BOT_TOKEN または bots.yml の webex_bot_token を設定してください)")
+                print(f"  [SKIP] {ch_name}: bot_token が未設定です (.env の WEBEX_BOT_TOKEN または channels.yml の webex_bot_token を設定してください)")
                 continue
 
             # ラベル: source_feeds 専用（categories なし）のチャンネルは
@@ -2139,7 +2269,7 @@ def main() -> None:
                 hours_ago=hours,
                 now_jst=now_jst,
                 dry_run=args.dry_run,
-                anthropic_api_key=ANTHROPIC_API_KEY,
+                anthropic_api_key=llm_api_key(),
                 summarize_cache=summarize_cache,
                 anthropic_model=ANTHROPIC_MODEL,
                 morning_message=morning_message,
@@ -2186,7 +2316,7 @@ def main() -> None:
                     print(f"  [SKIP] {ch_name}: {reason}")
                     continue
                 if not bot_token:
-                    print(f"  [SKIP] {ch_name}: bot_token が未設定です (.env の WEBEX_BOT_TOKEN または bots.yml の webex_bot_token を設定してください)")
+                    print(f"  [SKIP] {ch_name}: bot_token が未設定です (.env の WEBEX_BOT_TOKEN または channels.yml の webex_bot_token を設定してください)")
                     continue
                 print(f"  ▶ {ch_name} へダイジェストを送信")
                 if args.dry_run:
@@ -2210,7 +2340,7 @@ def main() -> None:
             hours_ago=hours,
             now_jst=now_jst,
             dry_run=args.dry_run,
-            anthropic_api_key=ANTHROPIC_API_KEY,
+            anthropic_api_key=llm_api_key(),
             summarize_cache=summarize_cache,
             anthropic_model=ANTHROPIC_MODEL,
             morning_message=morning_message,
