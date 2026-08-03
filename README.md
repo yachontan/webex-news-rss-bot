@@ -33,13 +33,13 @@ A Python script that collects today's RSS news in parallel, deduplicates, re-ran
   └──────────────┘        └────────────────┘      └──────────────┘
 ```
 
-**届くメッセージのイメージ**（実際の投稿例）
+**届くメッセージのイメージ**（書式のサンプル。記事は架空のものです）
 
 > 🗞 **セキュリティ**
-> 🏷 カテゴリ: **セキュリティ**　｜　✅ 15 件　｜　⏱ 2026-08-02 09:01 JST
+> 🏷 カテゴリ: **セキュリティ**　｜　✅ 15 件　｜　⏱ 2026-04-01 09:01 JST
 >
-> - [Chrome の更新頻度が週2回に　AI によるバグ発見の影響](https://example.com/)　（📅 2026-08-02 02:00 JST）
->   📝 AI を使った脆弱性調査で見つかる不具合が増え、Google は修正の配信間隔を短くしました。
+> - [主要ブラウザの更新頻度が週2回に　自動化された脆弱性調査の影響](https://example.com/)　（📅 2026-04-01 02:00 JST）
+>   📝 自動化された脆弱性調査で見つかる不具合が増えたため、修正の配信間隔が短縮されました。
 >
 > ✅ 今日も一日がんばりましょう。
 
@@ -227,6 +227,48 @@ git clone <このリポジトリのURL> rss-bot
 | **ダイジェスト** | 天気の観測地点（**地名から緯度経度を自動取得**）と、**時事ダイジェストの地域バランス**（日本/米国/その他の件数と判定語） |
 | **要約AI** | 要約・記事選定に使う AI（**Claude / OpenAI / Gemini**）とモデル名の設定。接続を試して確認できる |
 | **自動実行** | 毎朝の実行時刻と曜日を設定（macOS は launchd、Windows はタスク スケジューラに登録） |
+| **bot とスペース** | bot がどのスペースに入っているかの確認と、**トークンの有効性チェック**。切れていたら**その場で新しいトークンを貼り直せます**（下記） |
+
+### トークンが切れたとき / Replacing an expired token
+
+bot のアクセストークンは、開発者ポータルで **Regenerate** するとその時点で古い方が失効します。切れたトークンのまま実行すると、そのチャンネルだけが `401 Unauthorized` で配信されず、**他のチャンネルは成功する**ため気付きにくい状態になります。
+
+ウィザードから貼り直せます。`.env` を手で編集する必要はありません。**画面の3か所すべてから**直せます。
+
+| 場所 | いつ出るか |
+|:---|:---|
+| **セットアップ** タブ ステップ2 | 選んだトークンが無効だったとき、その場に入力欄が出ます |
+| **bot とスペース** タブ「スペースとその ID を調べる」 | 「スペースを取得」が失敗したとき |
+| **bot とスペース** タブ「すべてのトークンを確認」 | 「まとめて確認」で無効が見つかったとき（複数まとめて直せます） |
+
+```bash
+# ブラウザUI: 「bot とスペース」タブ →「まとめて確認」→ 切れているものに入力欄が出ます
+./bin/streamlit run wizard/app.py
+
+# ターミナル: 確認と貼り直しだけを行う
+./bin/python -m wizard.cli --repair-tokens
+```
+
+どちらも同じ動きをします。
+
+- **有効だと確認できたときだけ `.env` を書き換えます**（無効な値で上書きして、元のトークンまで失う事故を防ぐため）
+- 書き換える前に `.env.bak-日時` として控えを残します
+- 保存すると、そのトークンが**どの bot のものか**を表示します（別の bot のトークンを貼ってしまう取り違えに気付けます）
+- 同じトークンが `.env` の他の変数にも入っている場合は警告します（1つの bot を複数スペースで使う設定でなければ、貼り間違いです）
+- 入力欄は伏せ字で、値は画面にも記録にも残しません
+
+通常のウィザード（`./bin/python -m wizard.cli`）でも、環境確認の直後に同じ確認が入ります。
+
+### bot がスペースに入っていないとき / Bot not in any space
+
+トークンが有効でも、bot がどのスペースにも参加していないと配信先を選べません。この場合、ウィザードが **bot のアドレス（`〜@webex.bot`）と追加手順**を表示します。
+
+1. Webex アプリで、配信したいスペースを開く
+2. スペース名 →「メンバーを追加」
+3. 表示された bot のアドレスを入力して追加
+4. 画面を再読み込みする
+
+セットアップタブ（ステップ2）、「すべてのトークンを確認」の結果、CLI のトークン確認、いずれでも案内が出ます。
 
 スペースごとに**送るものの種類**を選べます。
 
@@ -934,19 +976,34 @@ Approximate size of each category in this repository's `categories.yml`:
 | Cisco | 43 | 108 | Cisco固有ブランド + compound必須語 |
 
 ### 3. RSSフィード設定 (`urls.yml`) / RSS feed list
-ニュースの収集元となるRSSフィードURLの一覧を管理します。各要素は **文字列（通常のURL）** または **名前付きグループ** のどちらでも記述できます。  
-Lists the RSS feed URLs to collect articles from. Each item is either a plain URL string or a named group.
+**この bot が使う URL は、RSS も外部API もすべてここに集約します。Python コードには直書きしません。**  
+All URLs — RSS feeds and external APIs alike — live here, never hard-coded in the Python source.
+
+各要素は次の4形式のいずれかです。
+
 ```yaml
-# 通常のフィード（文字列）
+# 1. 通常のフィード（文字列）
 - https://blogs.cisco.com/feed
 - https://zenn.dev/topics/aiagent/feed
-- https://b.hatena.ne.jp/search/tag?q=AI&mode=rss
 
-# 名前付きグループ（channels: の source_groups から参照）
+# 2. 名前付きグループ（channels: の source_groups から参照）
 - group: cisco-advisory
   urls:
     - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
+
+# 3. 天気API（digest: true のチャンネルで使う。APIキー不要）
+- weather:
+    api_url: https://api.open-meteo.com/v1/forecast
+    locations:
+      - { label: 東京, lat: 35.6895, lon: 139.6917 }
+
+# 4. Cisco Security Advisory の CVSS 取得API（{adv_id} が Advisory ID に置き換わる）
+- cisco_advisory:
+    cvrf_url: https://sec.cloudapps.cisco.com/security/center/contentxml/CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
 ```
+
+形式 2〜4 は RSS ではないため、**記事の収集対象からは自動的に除外されます**。3 と 4 は任意で、書かなければその機能（天気ブロック／CVSS バッジ）を省いて動きます。
+
 > グループは、特定フィード由来の記事を専用チャンネルへ振り分けるための仕組みです。詳細は[ソースベース振り分けと Cisco Security Advisories](#ソースベース振り分けと-cisco-security-advisories--source-based-routing--cvss)を参照。
 
 ### 4. 朝メッセージ署名設定 (`morning_messages.txt`) / Morning footer phrases
@@ -1505,7 +1562,8 @@ Webex スペースの一覧・検索と、`.env` / `config.yml` に書く行の�
 * これは **エラーではなく情報ログ** です。SSLフォールバック機能により、`verify=False` で自動リトライしています。Anthropic/HuggingFace等の証明書チェーンが解決できないサイトでも自動的に取得を継続します。
 * **根本対処**（任意）: macOSのPython証明書をインストール
   ```bash
-  open "/Applications/Python 3.13/Install Certificates.command"
+  # 入れた Python のバージョンに読み替えてください（3.14 なら "Python 3.14"）
+  open "/Applications/Python 3.14/Install Certificates.command"
   ```
 
 ### ❌ Claude API が呼ばれない / 要約が機能しない
@@ -1574,6 +1632,12 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 | Version | 日付 | 何をしたか |
 |:---|:---|:---|
+| **v4.17.0** | 2026-08-03 | **Cisco Security Advisory の CVSS 取得APIのURLを `urls.yml` へ移した**（コードに直書きしない方針の徹底）。`urls.yml` の `cisco_advisory:` エントリに `cvrf_url` を書く形式で、`{adv_id}` が Advisory ID に置き換わる。エントリが無い場合は CVSS バッジを付けずに続行する（警告を1行出す）。ウィザードで `urls.yml` を作り直しても、このエントリはそのまま引き継がれる。 |
+| **v4.16.1** | 2026-08-03 | **不具合修正**: ウィザードが生成する `channels.yml` で、チャンネル名などを引用符なしで書いていた。`News Today : 天気とサマリー` のように **`: `（コロン+空白）を含む名前を付けると YAML として壊れ、設定ファイル全体が読めなくなる**（全チャンネルの配信が停止し、ウィザードも「まだ設定がありません」と表示する）。引用の要否を PyYAML に判定させる形に修正。`${VAR}` 参照や通常の名前は引用されないため、見た目は変わらない。`defers_to` / `source_groups` / `categories` / 天気の地点名にも同じ処理を適用。 |
+| v4.16.0 | 2026-08-03 | トークンの貼り直しを**セットアップタブからもできる**ようにした。v4.15.0 では「bot とスペース」タブで「まとめて確認」を押した後にしか出ず、実際に詰まる場所（セットアップでトークンを選んだ直後）に導線が無かった。あわせて「スペースを取得」の失敗時にもその場で直せるようにし、エラーに**どの変数が無効か**を表示するようにした。**bot がどのスペースにも参加していない場合**は、bot のアドレス（`〜@webex.bot`）と追加手順を案内する（セットアップ・トークン一覧・CLI のいずれでも）。 |
+| v4.15.1 | 2026-08-03 | **不具合修正**: ブラウザUIでチャンネルの「削除」にチェックを入れて保存しても、そのチャンネルが `channels.yml` に残り続けていた。削除されたチャンネルは書き出し一覧から外れるため、「今回編集しなかったチャンネルはそのまま残す」処理が**削除と未編集を区別できず**、原文のまま復活させていた。削除された名前を明示的に受け取るようにして修正。保存前の確認画面に「次の N 件を設定から削除します」を表示するようにした（Webex のスペースと bot は消えません）。 |
+| v4.15.0 | 2026-08-03 | **切れたトークンをウィザードから貼り直せる**ようにした。ブラウザUIの「bot とスペース」タブと、ターミナルの `--repair-tokens` の両方に対応。`.env` を手で編集しなくてよくなった。有効だと確認できたときだけ書き換え（控えつき）、保存時に**そのトークンがどの bot のものか**を表示し、同じトークンが別の変数にも入っていれば警告する（1つの bot のトークンを取り違えて複数チャンネルに入れると、別スペース宛の配信が同じ宛先へ流れるため）。 |
+| v4.14.1 | 2026-08-03 | **Python 3.14 での動作を確認**（必要要件は従来どおり 3.10 以上のまま。venv を作り直す手順も変わりません）。トラブルシューティングに残っていた `/Applications/Python 3.13/` という固定のパスを、入れた版に読み替える書き方へ修正。 |
 | **v4.14.0** | 2026-08-02 | 記事を仕分ける `categories.yml` も雛形方式にした。Git には `categories.yml.example` だけを置き、実ファイルは各自の環境で育てる形に変更（ウィザードが自動で作ります）。 |
 | **v4.13.0** | 2026-08-02 | **毎朝の自動実行を画面から設定**できるようにした（時刻・曜日を選ぶだけ。macOS は launchd、Windows はタスク スケジューラへ登録／解除／即時実行）。ブラウザUI・ターミナルの両方に対応。あわせて、**保存前に「何を上書き・追加するか」を一覧で示し、承諾しないと保存できない**ようにした。要約AI を切り替えるときは、他社のキーが設定済みである旨を警告する。 |
 | **v4.12.0** | 2026-08-02 | 設定ファイルが1つも無い状態でも、**bot を用意した時点でひな形から自動生成**するようにした（`.env` / `urls.yml` / `channels.yml` / `regions.yml` / `morning_messages.txt`）。既にあるファイルには触れない。ブラウザUI・ターミナル、macOS・Windows のいずれでも同じように動く。 |

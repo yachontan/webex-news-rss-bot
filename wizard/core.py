@@ -40,6 +40,8 @@ MIN_PYTHON = (3, 10)
 # Webex 開発者ポータルの固定URL（環境ごとに変わる設定値ではないため定数で持つ）
 BOT_CREATE_URL = "https://developer.webex.com/my-apps/new/bot"  # noqa: W02  外部サービスの固定URL
 BOT_DOCS_URL = "https://developer.webex.com/docs/bots"  # noqa: W02  外部サービスの固定URL
+BOT_LIST_URL = "https://developer.webex.com/my-apps"  # noqa: W02  外部サービスの固定URL
+WEBEX_ME_URL = "https://webexapis.com/v1/people/me"  # noqa: W02  外部サービスの固定URL
 
 
 # ===========================================================
@@ -303,6 +305,67 @@ def validate_token(token: str) -> tuple[bool, str]:
     except requests.exceptions.RequestException as exc:
         return False, f"Webex へ接続できません（{exc.__class__.__name__}）"
     return True, "トークンは有効です"
+
+
+def token_identity(token: str) -> tuple[str, str]:
+    """トークンが属する bot の (表示名, アドレス) を返す。取得できなければ ("", "")。
+
+    表示名は「貼ったトークンが本当にその bot のものか」の確認に、
+    アドレス（@webex.bot）は「このアドレスをスペースに招待してください」の案内に使う。
+    Returns (display name, bot address) so the user can verify and invite the bot.
+    """
+    import requests
+
+    token = (token or "").strip()
+    if not token:
+        return "", ""
+    try:
+        response = requests.get(WEBEX_ME_URL, timeout=15,
+                                headers={"Authorization": f"Bearer {token}"})
+        response.raise_for_status()
+    except requests.exceptions.RequestException:
+        return "", ""
+    data = response.json()
+    emails = data.get("emails") or []
+    return str(data.get("displayName") or ""), str(emails[0] if emails else "")
+
+
+def env_vars_sharing_token(token: str, exclude: str = "",
+                           path: Path | None = None) -> list[str]:
+    """同じトークン値が既に入っている .env の変数名を返す（貼り間違いの検出用）。
+
+    値そのものは返さない。1つの bot のトークンを複数の変数へ入れてしまうと、
+    別スペース宛の配信が同じ宛先へ流れる事故になるため、保存前に警告する材料にする。
+    """
+    from dotenv import dotenv_values
+
+    token = (token or "").strip()
+    path = path or ENV_FILE
+    if not token or not path.exists():
+        return []
+    values = dotenv_values(path)
+    return sorted(k for k, v in values.items()
+                  if k and k != exclude and (v or "").strip() == token)
+
+
+def replace_env_token(name: str, token: str) -> tuple[bool, str]:
+    """.env のトークン変数を1つだけ差し替える。戻り値は (成否, 説明)。
+
+    **有効性を確認できたときだけ書き込む。** 無効な値で上書きすると、
+    元のトークンも失って状況が悪くなるため。説明に値は含めない。
+    """
+    name = (name or "").strip()
+    if not name.startswith("WEBEX_BOT_TOKEN"):
+        return False, f"Bot トークンの変数名ではありません: {name}"
+    ok, message = validate_token(token)
+    if not ok:
+        return False, f"{message} — 変更していません"
+    try:
+        result = backup_and_write(ENV_FILE, build_env_text({name: (token or "").strip()}))
+    except OSError as exc:
+        return False, f".env に書き込めませんでした（{exc}）"
+    where = f"（控え: {result.backup.name}）" if result.backup else ""
+    return True, f"{name} を差し替えました{where}"
 
 
 def space_rows(spaces: list[dict], configured: dict[str, str] | None = None) -> list[dict]:
@@ -711,6 +774,24 @@ def build_env_text(values: dict[str, str], base: str | None = None) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def _yaml_scalar(value: object) -> str:
+    """YAML のスカラーとして安全な表記にする（必要なときだけ引用する）。
+
+    `News Today : 天気とサマリー` のように `: `（コロン+空白）を含む名前を素で書くと
+    マッピングと解釈され、**ファイル全体が読めなくなる**。他にも `#` や先頭の記号など
+    引用が要る文字がある。判定は PyYAML に任せるのが確実。
+    `${VAR}` 参照は引用不要と判定されるため、これまでどおりの見た目で残る。
+    Quote only when needed, so ${VAR} references stay readable.
+    """
+    import yaml
+
+    text = yaml.safe_dump(str(value), allow_unicode=True,
+                          default_flow_style=True, width=10 ** 6).strip()
+    if text.endswith("..."):
+        text = text[:-3].strip()
+    return text
+
+
 def _dump_entry(entry: dict, indent: str = "  ") -> list[str]:
     """dict をリスト要素の YAML 行に整形する（既存設定を原文の意味のまま出すため）。"""
     import yaml
@@ -731,7 +812,12 @@ def _feeds_block(feed_urls: list[str],
     lines = ["feeds:"]
     for entry in special_feeds or []:
         lines.append("")
-        label = "天気API" if "weather" in entry else f"グループ: {entry.get('group', '')}"
+        if "weather" in entry:
+            label = "天気API"
+        elif "cisco_advisory" in entry:
+            label = "Cisco Security Advisory の CVSS 取得API"
+        else:
+            label = f"グループ: {entry.get('group', '')}"
         lines.append(f"  # {label}（既存の設定をそのまま引き継ぎ）")
         lines.extend(_dump_entry(entry))
     if weather_labels and not any("weather" in e for e in (special_feeds or [])):
@@ -741,7 +827,7 @@ def _feeds_block(feed_urls: list[str],
         lines.append("      api_url: https://api.open-meteo.com/v1/forecast")
         lines.append("      locations:")
         for label, lat, lon in weather_labels:
-            lines.append(f"        - {{ label: {label}, lat: {lat}, lon: {lon} }}")
+            lines.append(f"        - {{ label: {_yaml_scalar(label)}, lat: {lat}, lon: {lon} }}")
     lines.append("")
     lines.append("  # 収集するRSSフィード")
     lines.extend(f"  - {url}" for url in feed_urls)
@@ -757,20 +843,31 @@ def channels_using_space(existing: ExistingConfig | None, space_id: str) -> list
 
 
 def channels_to_preserve(existing: ExistingConfig | None,
-                        edited_names: set[str]) -> list[dict]:
+                        edited_names: set[str],
+                        removed_names: set[str] | None = None) -> list[dict]:
     """今回編集しなかった既存チャンネルを、原文のまま返す。
 
     判定は**チャンネル名**で行う。スペースIDで判定すると、同じスペースに
     複数のチャンネル（例: ニュース配信とダイジェスト）を向けている場合に、
     片方を編集しただけでもう片方が消えてしまう。
     名前は ${VAR} で書かれていることがあるため、原文と展開後の両方で照合する。
+
+    removed_names は**画面で明示的に削除された**チャンネル名。削除されたものは
+    書き出す一覧（plans）から外れるため、指定が無いと「編集しなかった」と
+    区別が付かず、そのまま復活してしまう。
+    Explicitly removed channels must be named here, otherwise they look untouched
+    and get preserved verbatim.
     """
     if existing is None:
         return []
+    removed = removed_names or set()
     preserved = []
     for channel in existing.all_channels:
         raw = str(channel.get("name") or "")
-        if raw in edited_names or _expand_env(raw) in edited_names:
+        expanded = _expand_env(raw)
+        if raw in edited_names or expanded in edited_names:
+            continue
+        if raw in removed or expanded in removed:
             continue
         preserved.append(channel)
     return preserved
@@ -825,20 +922,20 @@ def build_channels_text(channels: list[ChannelPlan],
         body.append("")
         if plan.space_title and plan.space_title != plan.name:
             body.append(f"  # 投稿先: {plan.space_title}")
-        body.append(f"  - name: {plan.name_ref}")
-        body.append(f"    webex_space_id: {plan.space_id_ref}")
-        body.append(f"    webex_bot_token: {plan.token_ref}")
+        body.append(f"  - name: {_yaml_scalar(plan.name_ref)}")
+        body.append(f"    webex_space_id: {_yaml_scalar(plan.space_id_ref)}")
+        body.append(f"    webex_bot_token: {_yaml_scalar(plan.token_ref)}")
         if plan.priority:
             body.append("    priority: true       # 該当記事を独占し、他チャンネルからは除外する")
         if plan.defers_to:
             body.append("    defers_to:           # 下記チャンネルにも該当する記事は、そちらに譲る")
-            body.extend(f"      - {target}" for target in plan.defers_to)
+            body.extend(f"      - {_yaml_scalar(target)}" for target in plan.defers_to)
         if plan.min_japanese is not None:
             body.append(f"    min_japanese: {plan.min_japanese}"
                         "      # 日本語記事がこの件数を下回ったら新着順に補充する")
         if plan.source_groups:
             body.append("    source_groups:       # urls.yml のグループ由来の記事だけを専有配信")
-            body.extend(f"      - {group}" for group in plan.source_groups)
+            body.extend(f"      - {_yaml_scalar(group)}" for group in plan.source_groups)
         if plan.is_digest:
             body.append("    digest: true         # 天気＋各チャンネルの投稿まとめを1通に集約")
             body.append("    categories: []       # 自分ではニュースを集めない")
@@ -846,7 +943,7 @@ def build_channels_text(channels: list[ChannelPlan],
             body.append("    categories: []       # グループ指定のみで振り分ける")
         elif not plan.omits_categories:
             body.append("    categories:")
-            body.extend(f"      - {category}" for category in plan.categories)
+            body.extend(f"      - {_yaml_scalar(category)}" for category in plan.categories)
     for channel in kept_channels or []:
         body.append("")
         body.append("  # 既存の設定をそのまま引き継ぎ（優先配信・譲渡・ダイジェスト等）")
