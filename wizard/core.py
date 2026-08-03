@@ -483,6 +483,10 @@ class ChannelPlan:
     priority: bool = False
     # urls.yml の名前付きグループ。指定するとそのフィード由来の記事だけを専有配信する
     source_groups: list[str] = field(default_factory=list)
+    # ダイジェストに載せる枠と順番（is_digest のときだけ使う）。None なら既定。
+    digest_blocks: list[str] | None = None
+    # 天気の見せ方（table / list）。空なら本体の既定（表形式）。
+    weather_format: str = ""
 
     @property
     def suffix(self) -> str:
@@ -559,7 +563,17 @@ def _slug(text: str) -> str:
 # ウィザードが画面上で組み立てられるキー。これ以外を持つチャンネルは
 # 中身を理解できないため、編集せず原文のまま引き継ぐ。
 SIMPLE_CHANNEL_KEYS = {"name", "webex_space_id", "webex_bot_token", "categories",
-                       "digest", "defers_to", "min_japanese", "priority", "source_groups"}
+                       "digest", "defers_to", "min_japanese", "priority", "source_groups",
+                       "digest_blocks", "weather_format"}
+
+# ダイジェストに載せられる枠（本体の DIGEST_BLOCK_NAMES と揃える）
+DIGEST_BLOCKS = {
+    "weather": "天気（今日・明日）",
+    "channels": "各チャンネルの投稿まとめ",
+    "jiji": "時事ダイジェスト（地域バランス）",
+}
+DEFAULT_DIGEST_BLOCKS = ["weather", "channels"]
+WEATHER_STYLES = {"table": "表形式（見比べやすい）", "list": "箇条書き（折り返して読める）"}
 
 
 @dataclass
@@ -661,6 +675,9 @@ def _absorb_channel(result: ExistingConfig, channel: dict) -> None:
         "defers_to": [str(x) for x in (channel.get("defers_to") or [])],
         "min_japanese": channel.get("min_japanese"),
         "priority": bool(channel.get("priority")),
+        "digest_blocks": ([str(x) for x in channel["digest_blocks"]]
+                          if isinstance(channel.get("digest_blocks"), list) else None),
+        "weather_format": str(channel.get("weather_format") or ""),
     }
     token_ref = str(channel.get("webex_bot_token") or "")
     if token_ref:
@@ -945,8 +962,15 @@ def build_channels_text(channels: list[ChannelPlan],
             body.append("    source_groups:       # urls.yml のグループ由来の記事だけを専有配信")
             body.extend(f"      - {_yaml_scalar(group)}" for group in plan.source_groups)
         if plan.is_digest:
-            body.append("    digest: true         # 天気＋各チャンネルの投稿まとめを1通に集約")
+            body.append("    digest: true         # まとめを1通に集約して投稿する")
             body.append("    categories: []       # 自分ではニュースを集めない")
+            if plan.digest_blocks is not None:
+                labels = "、".join(DIGEST_BLOCKS.get(b, b) for b in plan.digest_blocks)
+                body.append(f"    digest_blocks:       # 載せる枠と順番（{labels or 'なし'}）")
+                body.extend(f"      - {_yaml_scalar(b)}" for b in plan.digest_blocks)
+            if plan.weather_format:
+                body.append(f"    weather_format: {_yaml_scalar(plan.weather_format)}"
+                            "   # table=表形式 / list=箇条書き")
         elif plan.source_groups and not plan.categories:
             body.append("    categories: []       # グループ指定のみで振り分ける")
         elif not plan.omits_categories:

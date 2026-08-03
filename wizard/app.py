@@ -349,6 +349,37 @@ def _render_channel_options(key: str, options: dict, other_names: list[str], kin
     return {"priority": priority, "defers_to": defers, "min_japanese": min_japanese}
 
 
+def _render_digest_options(key: str, options: dict) -> dict:
+    """ダイジェストに載せる枠と、天気の見せ方を選ぶ。"""
+    st.markdown("**ダイジェストに載せるもの**")
+    st.caption("チェックした順ではなく、下に並んでいる順で投稿されます。")
+    current = options.get("digest_blocks")
+    if current is None:
+        current = list(core.DEFAULT_DIGEST_BLOCKS)
+    chosen = []
+    for name, label in core.DIGEST_BLOCKS.items():
+        if st.checkbox(label, value=name in current, key=f"blk_{key}_{name}"):
+            chosen.append(name)
+    if not chosen:
+        st.warning("1つも選ばれていません。このままだと日付の見出しだけが投稿されます。",
+                   icon=":material/warning:")
+
+    style_keys = list(core.WEATHER_STYLES)
+    current_style = (options.get("weather_format") or "table").lower()
+    if current_style not in style_keys:
+        current_style = "table"
+    style = st.radio(
+        "天気の見せ方", style_keys,
+        index=style_keys.index(current_style),
+        format_func=lambda k: core.WEATHER_STYLES[k],
+        key=f"wfmt_{key}", horizontal=True,
+        disabled="weather" not in chosen,
+        help="表形式は地点を見比べやすく、箇条書きはスマホで折り返して読めます。")
+    st.caption("Webex は Markdown の表に対応していないため、表形式は等幅のコードブロックで描きます。"
+               "地点や列が多いとスマホでは横スクロールになります。")
+    return {"digest_blocks": chosen, "weather_format": style}
+
+
 def _render_channel_card(key: str, name: str, space_id: str, space_label: str,
                          categories: list[str], current_cats: list[str], options: dict,
                          other_names: list[str], is_digest: bool,
@@ -380,6 +411,7 @@ def _render_channel_card(key: str, name: str, space_id: str, space_label: str,
                                     default=current_kind, key=f"kind_{key}") or KIND_NEWS
         chosen, groups = _render_target_picker(key, new_name, categories, current_cats,
                                                options.get("source_groups", []), kind)
+        digest_opts = _render_digest_options(key, options) if kind == KIND_DIGEST else {}
         adv = _render_channel_options(key, options, other_names, kind)
 
     if not new_name.strip():
@@ -392,7 +424,9 @@ def _render_channel_card(key: str, name: str, space_id: str, space_label: str,
         name=new_name.strip(), categories=chosen, space_id=space_id, space_title=space_label,
         bot_token_ref=token_ref, space_ref=space_ref, is_digest=(kind == KIND_DIGEST),
         source_groups=groups,
-        defers_to=adv["defers_to"], min_japanese=adv["min_japanese"], priority=adv["priority"])
+        defers_to=adv["defers_to"], min_japanese=adv["min_japanese"], priority=adv["priority"],
+        digest_blocks=digest_opts.get("digest_blocks"),
+        weather_format=digest_opts.get("weather_format", ""))
 
 
 def render_feeds(existing: core.ExistingConfig | None) -> list[str]:
@@ -1155,8 +1189,11 @@ def _render_region_editor() -> tuple[dict[str, int], list[str], list[str]]:
 def render_digest_manager() -> None:
     """ダイジェストタブ: 天気の地点と、時事ダイジェストの地域バランス。"""
     st.header("ダイジェストの設定")
-    st.caption("**ダイジェスト（天気＋まとめ）チャンネル**の中身を調整します。"
+    st.caption("**ダイジェストチャンネル**の中身を調整します。"
                "ダイジェストを使っていない場合、この設定は配信に影響しません。")
+    st.info("**どの枠を載せるか**（天気／各チャンネルのまとめ／時事）と**天気の見せ方**は、"
+            "「セットアップ」タブのチャンネル設定で選びます。ここでは天気の観測地点と、"
+            "時事ダイジェストの地域バランスを設定します。", icon=":material/info:")
 
     existing = core.load_existing_config()
     others = [e for e in (existing.special_feeds if existing else []) if "group" not in e]
