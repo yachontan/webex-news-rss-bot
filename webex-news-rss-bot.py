@@ -64,6 +64,12 @@ CATEGORIES_FILE = os.path.join(_BASE, "categories.yml")
 #   urls.yml     : 収集するRSSフィード（feeds:）
 #   channels.yml : 配信先チャンネル（channels:）
 # Config is split by purpose: urls.yml (feeds) and channels.yml (channels).
+# 1チャンネルに1回で投稿する記事数の上限。channels.yml の max_items で変えられる。
+# これを超えた分は LLM 再ランク（失敗時は stratified_pick）で絞り込む。
+# 既定引数から参照するため、関数定義より前に置く必要がある。
+MAX_ITEMS_DEFAULT = 15
+MAX_ITEMS_LIMIT = 50      # 多すぎると1通が長大になり Webex 側で分割される
+
 URLS_FILE       = os.path.join(_BASE, "urls.yml")
 CHANNELS_FILE   = os.path.join(_BASE, "channels.yml")
 # 旧構成（1ファイルにまとめていた頃）。両方が無い場合の後方互換として読む。
@@ -1733,6 +1739,7 @@ def process_channel(
     cat_label_override: str | None = None,
     digest_collector: dict[str, list[dict]] | None = None,
     cvrf_url_template: str = "",
+    max_items: int = MAX_ITEMS_DEFAULT,
 ) -> None:
     """
     1チャンネル分のフィルタリングと送信を処理します。
@@ -1752,7 +1759,7 @@ def process_channel(
     else:
         filtered = filter_by_category(all_entries, categories, category_keywords)
 
-    if len(filtered) > 15:
+    if len(filtered) > max_items:
         # スコア降順で集計（ログ用）
         from collections import Counter
         score_dist = Counter(e.get("_score", 0) for e in filtered)
@@ -1761,7 +1768,7 @@ def process_channel(
         reranked = None
         if anthropic_api_key:
             reranked = rerank_with_llm(
-                channel_name, cat_label, filtered, 15,
+                channel_name, cat_label, filtered, max_items,
                 anthropic_api_key, ANTHROPIC_RERANK_MODEL,
             )
         if reranked is not None:
@@ -1770,15 +1777,15 @@ def process_channel(
         else:
             if anthropic_api_key:
                 print("    LLM再ランク失敗 → stratified_pick にフォールバック")
-            # 高スコア優先で15件に絞る（同階層内のみランダム抽出）
-            filtered = stratified_pick(filtered, 15)
+            # 高スコア優先で上限まで絞る（同階層内のみランダム抽出）
+            filtered = stratified_pick(filtered, max_items)
         kept_dist = Counter(e.get("_score", 0) for e in filtered)
         kept_str = " / ".join(f"score={s}:{c}" for s, c in sorted(kept_dist.items(), reverse=True))
-        print(f"    15件超 → 絞り込み後: {len(filtered)} 件")
+        print(f"    {max_items}件超 → 絞り込み後: {len(filtered)} 件")
         print(f"      抽出前 ({sum(score_dist.values())}件): {dist_str}")
         print(f"      抽出後 ({sum(kept_dist.values())}件): {kept_str}")
     else:
-        print(f"    15件以下（再ランク不要）: {len(filtered)} 件")
+        print(f"    {max_items}件以下（再ランク不要）: {len(filtered)} 件")
 
     filtered.sort(key=lambda x: x["published"], reverse=True)
 
@@ -1944,6 +1951,28 @@ def build_digest_message(
                 all_entries, category_keywords, regions_cfg, shown_links, min_japanese))
 
     return "\n".join(p for p in parts if p)
+
+
+def max_items_of(channel: dict) -> int:
+    """チャンネル設定から1回に投稿する記事数の上限を返す。
+
+    未指定なら既定（MAX_ITEMS_DEFAULT）。1未満や上限超え、数値でない値は
+    既定に戻して知らせる（黙って想定外の件数で配信しないため）。
+    """
+    raw = channel.get("max_items")
+    if raw is None:
+        return MAX_ITEMS_DEFAULT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        print(f"  [WARN] {channel.get('name')}: max_items は数字で書いてください"
+              f"（'{raw}'）。既定の {MAX_ITEMS_DEFAULT} 件を使います")
+        return MAX_ITEMS_DEFAULT
+    if not 1 <= value <= MAX_ITEMS_LIMIT:
+        print(f"  [WARN] {channel.get('name')}: max_items は 1〜{MAX_ITEMS_LIMIT} の範囲で"
+              f"書いてください（{value}）。既定の {MAX_ITEMS_DEFAULT} 件を使います")
+        return MAX_ITEMS_DEFAULT
+    return value
 
 
 def digest_blocks_of(channel: dict) -> list[str]:
@@ -2463,6 +2492,7 @@ def main() -> None:
                 cat_label_override=cat_label_override,
                 digest_collector=digest_collector,
                 cvrf_url_template=cvrf_url_template,
+                max_items=max_items_of(ch),
             )
             time.sleep(1)  # チャンネル間のレート制限
 

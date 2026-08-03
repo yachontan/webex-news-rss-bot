@@ -487,6 +487,8 @@ class ChannelPlan:
     digest_blocks: list[str] | None = None
     # 天気の見せ方（table / list）。空なら本体の既定（表形式）。
     weather_format: str = ""
+    # 1回に投稿する記事数の上限。None なら本体の既定（15件）。
+    max_items: int | None = None
 
     @property
     def suffix(self) -> str:
@@ -564,7 +566,7 @@ def _slug(text: str) -> str:
 # 中身を理解できないため、編集せず原文のまま引き継ぐ。
 SIMPLE_CHANNEL_KEYS = {"name", "webex_space_id", "webex_bot_token", "categories",
                        "digest", "defers_to", "min_japanese", "priority", "source_groups",
-                       "digest_blocks", "weather_format"}
+                       "digest_blocks", "weather_format", "max_items"}
 
 # ダイジェストに載せられる枠（本体の DIGEST_BLOCK_NAMES と揃える）
 DIGEST_BLOCKS = {
@@ -574,6 +576,10 @@ DIGEST_BLOCKS = {
 }
 DEFAULT_DIGEST_BLOCKS = ["weather", "channels"]
 WEATHER_STYLES = {"table": "表形式（見比べやすい）", "list": "箇条書き（折り返して読める）"}
+
+# 1回に投稿する記事数の上限（本体の MAX_ITEMS_DEFAULT / MAX_ITEMS_LIMIT と揃える）
+MAX_ITEMS_DEFAULT = 15
+MAX_ITEMS_LIMIT = 50
 
 
 @dataclass
@@ -678,6 +684,7 @@ def _absorb_channel(result: ExistingConfig, channel: dict) -> None:
         "digest_blocks": ([str(x) for x in channel["digest_blocks"]]
                           if isinstance(channel.get("digest_blocks"), list) else None),
         "weather_format": str(channel.get("weather_format") or ""),
+        "max_items": channel.get("max_items"),
     }
     token_ref = str(channel.get("webex_bot_token") or "")
     if token_ref:
@@ -955,6 +962,9 @@ def build_channels_text(channels: list[ChannelPlan],
         if plan.defers_to:
             body.append("    defers_to:           # 下記チャンネルにも該当する記事は、そちらに譲る")
             body.extend(f"      - {_yaml_scalar(target)}" for target in plan.defers_to)
+        if plan.max_items is not None:
+            body.append(f"    max_items: {plan.max_items}"
+                        "         # このスペースに1回で投稿する記事数の上限")
         if plan.min_japanese is not None:
             body.append(f"    min_japanese: {plan.min_japanese}"
                         "      # 日本語記事がこの件数を下回ったら新着順に補充する")
@@ -981,6 +991,32 @@ def build_channels_text(channels: list[ChannelPlan],
         body.append("  # 既存の設定をそのまま引き継ぎ（優先配信・譲渡・ダイジェスト等）")
         body.extend(_dump_entry(channel))
     return "\n".join(header + body).rstrip() + "\n"
+
+
+def channels_text_with_digest_blocks(existing: ExistingConfig,
+                                     choices: dict[str, dict]) -> str:
+    """ダイジェストチャンネルの枠設定だけを差し替えた channels.yml を組み立てる。
+
+    choices は {チャンネル名（原文）: {digest_blocks, weather_format}}。
+    それ以外のチャンネルと設定は**原文のまま**書き出すため、この画面から
+    他のチャンネルの内容が変わることはない。
+    """
+    updated = []
+    for channel in existing.all_channels:
+        raw_name = str(channel.get("name") or "")
+        picked = choices.get(raw_name)
+        if picked is None:
+            updated.append(channel)
+            continue
+        merged = dict(channel)
+        merged["digest_blocks"] = list(picked.get("digest_blocks") or [])
+        style = str(picked.get("weather_format") or "").strip()
+        if style:
+            merged["weather_format"] = style
+        else:
+            merged.pop("weather_format", None)
+        updated.append(merged)
+    return build_channels_text([], kept_channels=updated)
 
 
 def default_feed_urls(path: Path | None = None) -> list[str]:
