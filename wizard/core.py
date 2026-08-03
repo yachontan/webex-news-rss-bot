@@ -1598,6 +1598,72 @@ WEEKDAY_LABELS = ["月", "火", "水", "木", "金", "土", "日"]
 _MAC_WEEKDAY = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 0}   # 月=1 … 日=0
 _WIN_WEEKDAY = {0: "MON", 1: "TUE", 2: "WED", 3: "THU", 4: "FRI", 5: "SAT", 6: "SUN"}
 
+OS_MACOS, OS_WINDOWS, OS_LINUX, OS_OTHER = "macos", "windows", "linux", "other"
+
+
+def current_os() -> str:
+    """いま動いている OS を返す。判定はここ1箇所に集約する。
+
+    以前は `platform.system() == "Windows"` かどうかだけで分岐しており、
+    **Linux などが macOS 扱い**になっていた（`~/Library/LaunchAgents` に plist を
+    書いて `launchctl` を呼ぼうとして、原因の分からないエラーになる）。
+    """
+    return {"Darwin": OS_MACOS, "Windows": OS_WINDOWS,
+            "Linux": OS_LINUX}.get(platform.system(), OS_OTHER)
+
+
+def os_label() -> str:
+    """画面に出す OS 名。"""
+    return {OS_MACOS: "macOS", OS_WINDOWS: "Windows",
+            OS_LINUX: "Linux"}.get(current_os(), platform.system() or "不明な OS")
+
+
+@dataclass
+class SchedulerInfo:
+    """この OS で自動実行をどう登録するか。supported=False なら登録できない。"""
+
+    supported: bool
+    mechanism: str        # 使う仕組みの名前
+    where: str            # 登録先（利用者が自分で確認できる場所）
+    runner: str           # 定時実行から呼ばれるファイル
+    note: str = ""        # その OS 固有の注意
+
+
+def scheduler_info() -> SchedulerInfo:
+    """OS ごとの自動実行の仕組みを返す。"""
+    system = current_os()
+    if system == OS_MACOS:
+        return SchedulerInfo(
+            supported=True, mechanism="launchd", runner="run_rssbot.sh",
+            where=f"~/Library/LaunchAgents/{SCHEDULE_LABEL}.plist",
+            note="launchd は Mac がスリープ中だと起動しません。"
+                 "`sudo pmset repeat wakeorpoweron MTWRF 08:55:00` のように、"
+                 "実行時刻の少し前に自動で起きるよう設定しておくと確実です。")
+    if system == OS_WINDOWS:
+        return SchedulerInfo(
+            supported=True, mechanism="タスク スケジューラ", runner="run_rssbot.bat",
+            where=f"タスク スケジューラ ライブラリの「{SCHEDULE_TASK_NAME}」",
+            note="スリープからの復帰は既定では行いません。"
+                 "タスクのプロパティ →「条件」→「タスクを実行するためにスリープを解除する」を"
+                 "有効にすると、時刻に合わせて復帰します。")
+    return SchedulerInfo(
+        supported=False, mechanism="（この OS 向けの登録機能はありません）",
+        runner="run_rssbot.sh", where="—",
+        note="cron などに `run_rssbot.sh` を登録してください。"
+             "例: `crontab -e` で `1 9 * * 1-5 " + str(REPO_ROOT / "run_rssbot.sh") + "`")
+
+
+def schtasks_create_command(hour: int, minute: int, weekdays: list[int]) -> list[str]:
+    """Windows のタスク登録コマンドを組み立てる（実行はしない）。
+
+    `/TR` に自分で引用符を付けない。subprocess がリスト要素を適切に引用するため、
+    ここで `"..."` を足すと引用符ごと引数として渡ってしまう。
+    """
+    days = ",".join(_WIN_WEEKDAY[d] for d in sorted(weekdays))
+    return ["schtasks", "/Create", "/TN", SCHEDULE_TASK_NAME,
+            "/TR", str(runner_path()), "/SC", "WEEKLY",
+            "/D", days, "/ST", f"{hour:02d}:{minute:02d}", "/F"]
+
 
 def _plist_path() -> Path:
     """macOS で plist を置く場所。"""
@@ -1606,18 +1672,18 @@ def _plist_path() -> Path:
 
 def runner_path() -> Path:
     """定時実行から呼ぶラッパーのパス（OS ごとに違う）。"""
-    return REPO_ROOT / ("run_rssbot.bat" if platform.system() == "Windows" else "run_rssbot.sh")
+    return REPO_ROOT / scheduler_info().runner
 
 
 def ensure_runner() -> tuple[bool, str]:
     """ラッパーを用意する。無ければ雛形から作り、実行できるようにする。"""
     runner = runner_path()
     if runner.exists():
-        if platform.system() != "Windows":
+        if current_os() != OS_WINDOWS:
             runner.chmod(runner.stat().st_mode | 0o111)
         return True, f"{runner.name} を使います"
     template = REPO_ROOT / "run_rssbot.sh.example"
-    if platform.system() == "Windows" or not template.exists():
+    if current_os() == OS_WINDOWS or not template.exists():
         return False, f"{runner.name} が見つかりません（リポジトリが壊れている可能性があります）"
     try:
         shutil.copyfile(template, runner)
@@ -1679,11 +1745,12 @@ def install_schedule(hour: int, minute: int, weekdays: list[int]) -> tuple[bool,
     if not ok:
         return False, message
 
-    if platform.system() == "Windows":
-        days = ",".join(_WIN_WEEKDAY[d] for d in sorted(weekdays))
-        ok, output = _run(["schtasks", "/Create", "/TN", SCHEDULE_TASK_NAME,
-                           "/TR", f'"{runner_path()}"', "/SC", "WEEKLY",
-                           "/D", days, "/ST", f"{hour:02d}:{minute:02d}", "/F"])
+    info = scheduler_info()
+    if not info.supported:
+        return False, f"{os_label()} では自動実行を登録できません。{info.note}"
+
+    if current_os() == OS_WINDOWS:
+        ok, output = _run(schtasks_create_command(hour, minute, weekdays))
         return ok, output or ("登録しました" if ok else "登録に失敗しました")
 
     path = _plist_path()
@@ -1699,7 +1766,9 @@ def install_schedule(hour: int, minute: int, weekdays: list[int]) -> tuple[bool,
 
 def remove_schedule() -> tuple[bool, str]:
     """登録した自動実行を解除する。"""
-    if platform.system() == "Windows":
+    if not scheduler_info().supported:
+        return False, f"{os_label()} では自動実行を登録できません"
+    if current_os() == OS_WINDOWS:
         ok, output = _run(["schtasks", "/Delete", "/TN", SCHEDULE_TASK_NAME, "/F"])
         return ok, output or ("解除しました" if ok else "解除できませんでした")
     path = _plist_path()
@@ -1714,9 +1783,12 @@ def remove_schedule() -> tuple[bool, str]:
 
 def schedule_status() -> tuple[bool, str]:
     """いま自動実行が登録されているかを調べる。"""
-    if platform.system() == "Windows":
-        ok, output = _run(["schtasks", "/Query", "/TN", SCHEDULE_TASK_NAME])
-        return ok, output if ok else "登録されていません"
+    if not scheduler_info().supported:
+        return False, f"{os_label()} には登録の仕組みがありません"
+    if current_os() == OS_WINDOWS:
+        ok, _ = _run(["schtasks", "/Query", "/TN", SCHEDULE_TASK_NAME])
+        # 出力は表形式で長いため、画面には要約だけを出す
+        return ok, (f"登録済みです（{SCHEDULE_TASK_NAME}）" if ok else "登録されていません")
     path = _plist_path()
     if not path.exists():
         return False, "登録されていません"
@@ -1728,7 +1800,9 @@ def schedule_status() -> tuple[bool, str]:
 
 def run_schedule_now() -> tuple[bool, str]:
     """登録した処理をいますぐ1回実行する（動作確認用）。"""
-    if platform.system() == "Windows":
+    if not scheduler_info().supported:
+        return False, f"{os_label()} には登録の仕組みがありません"
+    if current_os() == OS_WINDOWS:
         return _run(["schtasks", "/Run", "/TN", SCHEDULE_TASK_NAME])
     return _run(["launchctl", "start", SCHEDULE_LABEL])
 

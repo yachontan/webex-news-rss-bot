@@ -841,6 +841,24 @@ def _render_overview_feeds(existing: core.ExistingConfig) -> None:
                    f"その他 {len(regions['keywords']['other'])} 語")
 
 
+def _render_os_block() -> bool:
+    """いまの OS と、そこで使う仕組みを示す。登録できない OS なら False。"""
+    info = core.scheduler_info()
+    if not info.supported:
+        st.warning(f"**{core.os_label()} 向けの登録機能はありません。**\n\n{info.note}",
+                   icon=":material/computer:")
+        st.caption("設定ファイルの作成や dry-run など、他のタブの機能はそのまま使えます。")
+        return False
+    st.info(f"**いま動かしているのは {core.os_label()} です。**\n\n"
+            f"- 使う仕組み: **{info.mechanism}**\n"
+            f"- 登録先: `{info.where}`\n"
+            f"- 定時実行から呼ばれるファイル: `{info.runner}`",
+            icon=":material/computer:")
+    if info.note:
+        st.caption(f":material/lightbulb: {info.note}")
+    return True
+
+
 def _render_location_block() -> bool:
     """置き場所が自動実行に使えるかを確かめる。使えなければ理由を出して False。
 
@@ -864,11 +882,8 @@ def render_scheduler() -> None:
     st.caption("毎朝きまった時刻に、このツールを自動で動かします。"
                "**パソコンの電源が入っていて、スリープしていない**ことが前提です。")
 
-    import platform
-    system = platform.system()
-    mechanism = {"Darwin": "macOS の launchd", "Windows": "Windows のタスク スケジューラ"}.get(
-        system, f"{system}（cron などをお使いください）")
-    st.caption(f"この環境では **{mechanism}** に登録します。")
+    if not _render_os_block():
+        return
 
     if not _render_location_block():
         return

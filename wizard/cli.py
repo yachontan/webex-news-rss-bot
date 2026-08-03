@@ -300,6 +300,18 @@ def step_dry_run() -> None:
 def step_schedule() -> None:
     """ステップ7: 毎朝の自動実行を登録する（UI 版と同じ仕組みを使う）。"""
     print(f"\n{RULE}\nステップ 7 / 毎朝の自動実行を設定します\n{RULE}")
+    info = core.scheduler_info()
+    print(f"  いま動かしているのは {core.os_label()} です。")
+    if not info.supported:
+        print(f"  ❌ {core.os_label()} 向けの登録機能はありません。")
+        print(f"     {info.note}")
+        return
+    print(f"     使う仕組み : {info.mechanism}")
+    print(f"     登録先     : {info.where}")
+    print(f"     呼ばれる物 : {info.runner}")
+    if info.note:
+        print(f"     ※ {info.note}")
+
     # 置き場所が TCC 保護下だと、登録できても定時実行だけが静かに失敗する
     location = core.check_location()
     if not location.ok:
