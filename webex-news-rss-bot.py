@@ -168,6 +168,31 @@ def load_url_groups(path: str = URLS_FILE) -> dict[str, list[str]]:
     return groups
 
 
+def load_advisory_config(path: str = URLS_FILE) -> str:
+    """
+    urls.yml 内の cisco_advisory エントリから CVRF API の URL 雛形を読み込みます。
+    Loads the CVRF URL template from the `cisco_advisory` entry in urls.yml.
+
+    形式 / Format:
+        - cisco_advisory:
+            cvrf_url: https://.../CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
+
+    `{adv_id}` が Advisory ID に置き換わる。URL の正本は urls.yml に集約し、
+    Python コードには直書きしない。未定義の場合は空文字を返す
+    （その場合 CVSS バッジの付与をスキップする）。
+    cisco_advisory エントリは urls / group キーを持たないため RSS 収集からは無視される。
+    """
+    for item in _read_feeds(path):
+        if not (isinstance(item, dict) and item.get("cisco_advisory")):
+            continue
+        template = str((item["cisco_advisory"] or {}).get("cvrf_url") or "").strip()
+        if template and "{adv_id}" in template:
+            return template
+        if template:
+            print("  [WARN] urls.yml cisco_advisory: cvrf_url に {adv_id} が含まれていません")
+    return ""
+
+
 def load_weather_config(path: str = URLS_FILE) -> dict | None:
     """
     urls.yml 内の weather エントリ（天気API設定）を読み込みます。
@@ -489,10 +514,12 @@ def _cvss_color(score: float) -> str:
     return "🟡"
 
 
-def fetch_cisco_cvss(link: str) -> tuple[str, str]:
+def fetch_cisco_cvss(link: str, cvrf_url_template: str) -> tuple[str, str]:
     """
     Cisco Security Advisory の CVRF から CVSS Base Score を取得し、
     (表示文字列, 危険度カラー絵文字) を返す。
+
+    cvrf_url_template は urls.yml の cisco_advisory エントリ由来（`{adv_id}` を含む）。
     advisory でない・取得失敗・スコア無しの場合は ("", "") を返す（表示しない）。
     色は複数スコア時は最大値（最悪ケース）で決定する。
     """
@@ -502,10 +529,7 @@ def fetch_cisco_cvss(link: str) -> tuple[str, str]:
     if adv_id in _CVSS_CACHE:
         return _CVSS_CACHE[adv_id]
 
-    cvrf_url = (
-        "https://sec.cloudapps.cisco.com/security/center/contentxml/"
-        f"CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml"
-    )
+    cvrf_url = cvrf_url_template.format(adv_id=adv_id)
     result: tuple[str, str] = ("", "")
     try:
         resp = requests.get(
@@ -528,17 +552,24 @@ def fetch_cisco_cvss(link: str) -> tuple[str, str]:
     return result
 
 
-def enrich_cisco_cvss_in_place(entries: list[dict]) -> None:
+def enrich_cisco_cvss_in_place(entries: list[dict], cvrf_url_template: str) -> None:
     """
     Cisco Security Advisory のエントリに CVSS スコア（entry["cvss"]）を付与する。
     advisory でないエントリは何もしない（ネットワーク取得も行わない）。
+
+    cvrf_url_template が空（urls.yml に cisco_advisory エントリが無い）の場合は
+    取得をスキップする。URL をコードに直書きしないための仕様。
     """
     targets = [e for e in entries if "/CiscoSecurityAdvisory/" in (e.get("link") or "")]
     if not targets:
         return
+    if not cvrf_url_template:
+        print(f"    [WARN] urls.yml に cisco_advisory エントリが無いため "
+              f"CVSS 取得をスキップします（対象 {len(targets)} 件）")
+        return
     print(f"    --- CVSS 取得処理を開始 (対象: {len(targets)} 件) ---")
     for e in targets:
-        cvss, color = fetch_cisco_cvss(e.get("link", ""))
+        cvss, color = fetch_cisco_cvss(e.get("link", ""), cvrf_url_template)
         if cvss:
             e["cvss"] = cvss
             e["cvss_color"] = color
@@ -1598,6 +1629,7 @@ def process_channel(
     pre_filtered: list[dict] | None = None,
     cat_label_override: str | None = None,
     digest_collector: dict[str, list[dict]] | None = None,
+    cvrf_url_template: str = "",
 ) -> None:
     """
     1チャンネル分のフィルタリングと送信を処理します。
@@ -1649,7 +1681,7 @@ def process_channel(
 
     # Cisco Security Advisory は CVSS スコアを取得して付与（要約より前に実行）。
     # 非 advisory エントリはネットワーク取得を行わないため他チャンネルには無影響。
-    enrich_cisco_cvss_in_place(filtered)
+    enrich_cisco_cvss_in_place(filtered, cvrf_url_template)
 
     # Claudeによる要約を実行 (APIキーが設定されている場合のみ)
     if anthropic_api_key and summarize_cache is not None:
@@ -1904,6 +1936,7 @@ def main() -> None:
     rss_urls = load_urls(args.urls_file)
     url_groups = load_url_groups(args.urls_file)
     weather_config = load_weather_config(args.urls_file)  # デイリーダイジェスト用（urls.yml に集約）
+    cvrf_url_template = load_advisory_config(args.urls_file)  # CVSS 取得用（urls.yml に集約）
     regions_cfg = load_regions_config()  # 時事ダイジェストの地域バランス（regions.yml に集約）
     if args.categories_file != CATEGORIES_FILE:
         category_keywords = load_categories(args.categories_file)
@@ -2276,6 +2309,7 @@ def main() -> None:
                 pre_filtered=channel_filtered.get(ch_name),
                 cat_label_override=cat_label_override,
                 digest_collector=digest_collector,
+                cvrf_url_template=cvrf_url_template,
             )
             time.sleep(1)  # チャンネル間のレート制限
 
@@ -2344,6 +2378,7 @@ def main() -> None:
             summarize_cache=summarize_cache,
             anthropic_model=ANTHROPIC_MODEL,
             morning_message=morning_message,
+            cvrf_url_template=cvrf_url_template,
         )
 
     print("\n=== 完了 / Done ===")

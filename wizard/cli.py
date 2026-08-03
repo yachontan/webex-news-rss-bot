@@ -3,11 +3,13 @@
 ブラウザUI版（app.py）と同じ core.py を使うため、生成される設定は同じになる。
 
 実行 / Run:
-    ./bin/python -m wizard.cli
+    ./bin/python -m wizard.cli                  # 通常のウィザード
+    ./bin/python -m wizard.cli --repair-tokens  # 無効なトークンの貼り直しだけ
 """
 
 from __future__ import annotations
 
+import argparse
 import getpass
 import sys
 import webbrowser
@@ -88,6 +90,73 @@ def step_bot() -> str:
             return core.get_env_token(name)
     _guide_bot_creation()
     return getpass.getpass("作成した bot のアクセストークンを貼り付けてください: ").strip()
+
+
+def _repair_one_token(name: str) -> bool:
+    """無効なトークン1件を貼り直す。保存できたら True。"""
+    print(f"\n  ▶ {name}")
+    print(f"    {core.BOT_LIST_URL} で該当の bot を開き、Regenerate で再発行してください。")
+    print("    （再発行すると古いトークンはその時点で失効します）")
+    if not _ask_yes("    いま貼り直しますか？"):
+        print("    そのままにします。")
+        return False
+    while True:
+        try:
+            token = getpass.getpass("    新しいトークン（入力は表示されません）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            # 入力が閉じられた／中断された。ここで抜けないと再入力の確認が無限に回る。
+            print("\n    入力が中断されました。そのままにします。")
+            return False
+        if not token:
+            print("    ❌ 入力が空です。")
+        else:
+            owner, address = core.token_identity(token)
+            shared = core.env_vars_sharing_token(token, exclude=name)
+            ok, message = core.replace_env_token(name, token)
+            print(f"    {'✅' if ok else '❌'} {message}")
+            if ok:
+                if owner:
+                    print(f"    このトークンは「{owner}」（{address}）のものです。")
+                if shared:
+                    print(f"    ⚠️  同じトークンが {'、'.join(shared)} にも入っています。"
+                          "1つの bot を複数スペースで使う設定でなければ貼り間違いです。")
+                return True
+        if not _ask_yes("    もう一度入力しますか？"):
+            return False
+
+
+def step_token_health(interactive: bool = True) -> bool:
+    """.env の全トークンを確認し、無効なものをその場で貼り直す。全て有効なら True。"""
+    print(f"\n{RULE}\nトークンの確認\n{RULE}")
+    if not core.detect_env_tokens():
+        print("  .env に Bot トークンがまだありません。このあとの手順で設定します。")
+        return True
+    print("  Webex に問い合わせています...")
+    rows = core.check_all_tokens()
+    for row in rows:
+        mark = "✅" if row["状態"] == "有効" else "❌"
+        spaces = f" / 参加スペース {row['参加スペース数']}" if row["参加スペース数"] else ""
+        print(f"  {mark} {row['変数名']}: {row['内容']}{spaces}")
+
+    empty = [row["変数名"] for row in rows
+             if row["状態"] == "有効" and row["参加スペース数"] == "0"]
+    if empty:
+        print(f"\n  ⚠️  次の bot はトークンは有効ですが、どのスペースにも参加していません: "
+              f"{'、'.join(empty)}")
+        print("     Webex で配信したいスペースを開き、スペース名 →「メンバーを追加」から")
+        print("     bot のアドレス（〜@webex.bot）を追加してください。")
+
+    broken = [row["変数名"] for row in rows if row["状態"] != "有効"]
+    if not broken:
+        print("  すべてのトークンが有効です。")
+        return True
+    if not interactive:
+        return False
+    print(f"\n  {len(broken)} 件のトークンが使えません。貼り直せます"
+          "（有効だと確認できたときだけ .env を書き換え、控えを残します）。")
+    for name in broken:
+        _repair_one_token(name)
+    return not [row["変数名"] for row in core.check_all_tokens() if row["状態"] != "有効"]
 
 
 def step_token(token: str) -> tuple[str, list[dict]]:
@@ -266,11 +335,25 @@ def step_schedule() -> None:
         print("  ※ パソコンがスリープしていると実行されません。詳しくは README の「自動実行」を参照。")
 
 
+def parse_args() -> argparse.Namespace:
+    """コマンドライン引数を解釈する。"""
+    parser = argparse.ArgumentParser(description="rss-bot 初期設定ウィザード（CLI版）")
+    parser.add_argument("--repair-tokens", action="store_true",
+                        help="無効・期限切れのトークンの貼り直しだけを行って終了する")
+    return parser.parse_args()
+
+
 def main() -> int:
     """CLI ウィザードのエントリポイント。"""
+    args = parse_args()
+    if args.repair_tokens:
+        print("=== rss-bot トークンの貼り直し ===")
+        return 0 if step_token_health() else 1
+
     print("=== rss-bot 初期設定ウィザード（CLI版）===")
     if not step_diagnostics():
         return 1
+    step_token_health()
     categories = core.available_categories()
     if not categories:
         print("categories.yml が読めません。リポジトリが壊れていないか確認してください。")

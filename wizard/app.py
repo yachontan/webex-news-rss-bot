@@ -90,8 +90,12 @@ def _render_bot_creation_guide() -> None:
             "追加されていないスペースは、次のステップの一覧に出てきません。", icon=":material/info:")
 
 
-def render_bot() -> str:
-    """ステップ1: chat bot を用意する。使うトークンを返す（未確定なら空文字）。"""
+def render_bot() -> tuple[str, str]:
+    """ステップ1: chat bot を用意する。
+
+    戻り値は (トークン, `.env` の変数名)。変数名は、そのトークンが無効だったときに
+    「どの変数を貼り直せばよいか」を次のステップへ伝えるために返す。
+    """
     st.header("ステップ 1 ｜ chat bot の用意")
     known = core.detect_env_tokens()
 
@@ -106,24 +110,29 @@ def render_bot() -> str:
         st.caption("まだ bot のトークンが設定されていません。新しく作りましょう。")
         choice = "新しく bot を作る"
 
-    token = ""
+    token, token_var = "", ""
     with st.container(border=True):
         if choice == "設定済みの bot を使う":
             st.caption("`.env` にあるトークンを検出しました。変数名だけを表示し、値は画面に出しません。")
-            name = st.selectbox("使うトークン", known, key="known_token")
-            token = core.get_env_token(name)
-            st.caption(f"`{name}` を使用します。")
+            token_var = st.selectbox("使うトークン", known, key="known_token")
+            token = core.get_env_token(token_var)
+            st.caption(f"`{token_var}` を使用します。")
         else:
             _render_bot_creation_guide()
             token = st.text_input("作成した bot のアクセストークン", type="password",
                                   key="new_token",
                                   help="入力値は画面にもログにも残りません。").strip()
-    return token
+    return token, token_var
 
 
-def render_token(token: str) -> str:
-    """ステップ2: トークンを検証してスペース一覧を取得する。"""
+def render_token(token: str, token_var: str = "") -> str:
+    """ステップ2: トークンを検証してスペース一覧を取得する。
+
+    無効だった場合は、その場で新しいトークンを貼り直せるようにする
+    （`.env` から選んだトークンのときだけ。手入力の場合は上の欄を直せばよい）。
+    """
     st.header("ステップ 2 ｜ bot の確認")
+    _render_repair_notice()
     if not token:
         st.info("上でトークンを選ぶか貼り付けると、続きの手順が表示されます。")
         return ""
@@ -131,7 +140,12 @@ def render_token(token: str) -> str:
         with st.spinner("Webex に接続して確認しています..."):
             ok, message = core.validate_token(token)
         if not ok:
-            st.error(message)
+            st.error(f"{message}（`{token_var}`）" if token_var else message)
+            if token_var:
+                _render_regenerate_guide()
+                _render_token_form(token_var, key_prefix="setup_repair")
+            else:
+                st.caption("貼り付けたトークンが正しいか、ステップ1の欄で確認してください。")
             return ""
         st.session_state["validated_token"] = token
         st.session_state["spaces"] = core.list_spaces(token)
@@ -145,11 +159,9 @@ def render_token(token: str) -> str:
                 + "、".join(f"`{name}`" for name in created)
                 + "\n\nこのあとの手順で中身を埋めていきます。", icon=":material/note_add:")
     if not spaces:
-        st.warning("この bot が参加しているスペースがありません。"
-                   "Webex で bot をスペースに追加してから、ページを再読み込みしてください。",
-                   icon=":material/warning:")
-    else:
-        st.caption("スペースの詳しい情報や Room ID は「bot とスペース」タブで確認できます。")
+        _render_no_space_help(token)
+        return ""
+    st.caption("スペースの詳しい情報や Room ID は「bot とスペース」タブで確認できます。")
     return token
 
 
@@ -185,9 +197,13 @@ def _channel_options_of(channel: dict) -> dict:
             "source_groups": [str(x) for x in (channel.get("source_groups") or [])]}
 
 
-def render_channels(categories: list[str],
-                    existing: core.ExistingConfig | None) -> list[core.ChannelPlan]:
-    """ステップ3: 配信するチャンネルを1件ずつ編集し、必要なら追加する。"""
+def render_channels(categories: list[str], existing: core.ExistingConfig | None
+                    ) -> tuple[list[core.ChannelPlan], set[str]]:
+    """ステップ3: 配信するチャンネルを1件ずつ編集し、必要なら追加する。
+
+    戻り値は (書き出すチャンネル, 削除が選ばれたチャンネル名)。削除は plans に
+    現れないため、名前を別に返さないと「編集しなかった」と区別が付かない。
+    """
     st.header("ステップ 3 ｜ 配信するチャンネル")
     spaces = st.session_state.get("spaces", [])
     visible = {s.get("id", ""): (s.get("title") or "(名前なし)") for s in spaces}
@@ -198,13 +214,15 @@ def render_channels(categories: list[str],
     all_names = [str(c.get("name") or "") for c in (existing.all_channels if existing else [])]
 
     plans: list[core.ChannelPlan] = []
+    removed_names: set[str] = set()
     if editable:
         st.subheader(f"いまの設定（{len(editable)} 件）")
         for channel in editable:
             name = str(channel.get("name") or "")
             space_id = core._expand_env(channel.get("webex_space_id"))
+            widget_key = _widget_key(space_id, name)
             plan = _render_channel_card(
-                key=_widget_key(space_id, name), name=name, space_id=space_id,
+                key=widget_key, name=name, space_id=space_id,
                 space_label=visible.get(space_id, ""), categories=categories,
                 current_cats=list(channel.get("categories") or [name]),
                 options=_channel_options_of(channel),
@@ -214,6 +232,11 @@ def render_channels(categories: list[str],
                 space_ref=str(channel.get("webex_space_id") or ""))
             if plan:
                 plans.append(plan)
+            elif st.session_state.get(f"del_{widget_key}"):
+                # 「削除」にチェックされた場合だけ、消す対象として控える。
+                # 名前が空・カテゴリ未選択でも card は None を返すため、
+                # チェックの有無で「削除」と「入力途中」を区別する。
+                removed_names.add(name)
     else:
         st.caption("この bot で編集できる既存チャンネルはありません。下から追加できます。")
 
@@ -226,7 +249,7 @@ def render_channels(categories: list[str],
         names = "、".join(str(c.get("name")) for c in locked)
         st.caption(f":material/lock: 次の {len(locked)} 件はこの画面では変更しません"
                    f"（そのまま残します）: {names}")
-    return plans
+    return plans, removed_names
 
 
 def _render_new_channel(categories: list[str], visible: dict[str, str],
@@ -429,16 +452,24 @@ def _prepare_variable_mode(token: str, plans: list[core.ChannelPlan],
 
 
 def render_write(token: str, plans: list[core.ChannelPlan], feeds: list[str],
-                 existing: core.ExistingConfig | None) -> None:
+                 existing: core.ExistingConfig | None,
+                 removed_names: set[str] | None = None) -> None:
     """ステップ5: 内容を見せてから書き込む。既存の高度な設定は引き継ぐ。"""
     st.header("ステップ 5 ｜ 設定ファイルの作成")
 
     use_var, env_values, cat_text, cat_notes = _prepare_variable_mode(token, plans, existing)
     urls_text = core.build_urls_text(
         feeds, special_feeds=existing.special_feeds if existing else None)
-    preserved = core.channels_to_preserve(existing, core.edited_channel_names(plans))
+    preserved = core.channels_to_preserve(existing, core.edited_channel_names(plans),
+                                          removed_names=removed_names)
     channels_text = core.build_channels_text(plans, kept_channels=preserved)
 
+    if removed_names:
+        st.warning(f"次の **{len(removed_names)} 件を設定から削除します**: "
+                   + "、".join(sorted(removed_names))
+                   + "\n\n配信は止まりますが、Webex のスペースと bot はそのまま残ります"
+                     "（消したい場合は Webex 側で操作してください）。",
+                   icon=":material/delete:")
     if preserved:
         names = "、".join(str(c.get("name")) for c in preserved)
         st.info(f"次の **{len(preserved)} 件は編集せずそのまま残します**: {names}\n\n"
@@ -603,20 +634,24 @@ def _render_weather_editor(others: list[dict]) -> dict | None:
     return entry
 
 
-def _pick_token(known: list[str]) -> tuple[str, str]:
-    """確認に使うトークンを選ぶ。戻り値は (トークン, 表示用ラベル)。"""
+def _pick_token(known: list[str]) -> tuple[str, str, str]:
+    """確認に使うトークンを選ぶ。戻り値は (トークン, 表示用ラベル, .env の変数名)。
+
+    変数名は、無効だったときにその場で貼り直せるようにするために返す
+    （手入力のトークンは `.env` の変数に紐づかないため空文字）。
+    """
     modes = ([TOKEN_FROM_ENV] if known else []) + [TOKEN_MANUAL]
     mode = st.segmented_control("トークンの指定", modes, default=modes[0],
                                 key="inspect_mode") or modes[0]
     if mode == TOKEN_FROM_ENV:
         name = st.selectbox("確認する bot のトークン", known, key="inspect_token",
                             help="変数名だけを表示し、値は画面に出しません。")
-        return core.get_env_token(name), f"`{name}`"
+        return core.get_env_token(name), f"`{name}`", name
     st.caption("`.env` にまだ無い bot のトークンでも確認できます。"
                "入力値は画面にもログにも残りません。")
     token = st.text_input("Bot トークンを貼り付け", type="password",
                           key="inspect_manual").strip()
-    return token, "入力したトークン"
+    return token, "入力したトークン", ""
 
 
 def _render_env_line_builder(rows: list[dict]) -> None:
@@ -790,6 +825,92 @@ def render_scheduler() -> None:
             f"- **ログの場所**: `{core.REPO_ROOT / 'log'}` に、実行ごとの記録が残ります。")
 
 
+def _save_repaired_token(name: str, token: str) -> bool:
+    """貼り直したトークンを検証して .env へ保存する。保存できたら True。"""
+    token = (token or "").strip()
+    if not token:
+        st.error("トークンが入力されていません。")
+        return False
+    with st.spinner("Webex に問い合わせています..."):
+        owner, address = core.token_identity(token)
+        shared = core.env_vars_sharing_token(token, exclude=name)
+        ok, message = core.replace_env_token(name, token)
+    if not ok:
+        st.error(message)
+        return False
+    who = f"　このトークンは **{owner}**（`{address}`）のものです。" if owner else ""
+    notice = {"ok": message + who}
+    if shared:
+        notice["warn"] = (f"同じトークンが {'、'.join(shared)} にも入っています。"
+                          "1つの bot を複数スペースで使う設定でなければ、貼り間違いの可能性があります。")
+    st.session_state["repair_notice"] = notice
+    st.session_state["token_rows"] = core.check_all_tokens()
+    st.session_state.pop("validated_token", None)  # セットアップ側の検証結果も作り直す
+    return True
+
+
+def _render_repair_notice() -> None:
+    """直前の貼り直し結果を表示する（st.rerun をまたいで伝えるため）。"""
+    notice = st.session_state.pop("repair_notice", None)
+    if not notice:
+        return
+    st.success(notice["ok"])
+    if notice.get("warn"):
+        st.warning(notice["warn"])
+
+
+def _render_token_form(name: str, key_prefix: str = "repair") -> None:
+    """トークン変数1件分の貼り直し欄。
+
+    セットアップタブと「bot とスペース」タブの両方から使うため、
+    ウィジェットキーが衝突しないよう key_prefix で分ける。
+    """
+    with st.form(f"{key_prefix}_{name}", border=True):
+        st.markdown(f"**{name}**")
+        new_token = st.text_input("新しい Bot アクセストークン", type="password",
+                                  key=f"{key_prefix}_input_{name}",
+                                  placeholder="Regenerate で表示されたトークンを貼り付け")
+        if st.form_submit_button("確認して保存", type="primary"):
+            if _save_repaired_token(name, new_token):
+                st.rerun()
+
+
+def _render_regenerate_guide() -> None:
+    """トークン再発行のやり方と、書き換えの安全性を説明する。"""
+    st.markdown(
+        f"[Webex Developer Portal]({core.BOT_LIST_URL}) で該当の bot を開き、"
+        "**Regenerate** で新しいアクセストークンを発行してから、下の欄に貼り付けてください。"
+        "再発行すると古いトークンはその時点で失効します。")
+    st.caption("有効だと確認できたときだけ `.env` を書き換えます。"
+               "書き換える前に控え（`.env.bak-日時`）を残します。入力した値は表示・保存記録に残しません。")
+
+
+def _render_no_space_help(token: str) -> None:
+    """トークンは有効だが参加スペースが無いときに、bot の招待方法を案内する。"""
+    owner, address = core.token_identity(token)
+    who = f"**{owner}**" if owner else "この bot"
+    st.warning(
+        f"{who} はまだどのスペースにも参加していないため、配信先を選べません。",
+        icon=":material/group_add:")
+    st.markdown(
+        "**Webex で bot をスペースに追加してください。**\n\n"
+        "1. Webex アプリで、配信したいスペースを開く\n"
+        "2. スペース名 →「メンバーを追加」（People → Add people）\n"
+        f"3. bot のアドレス {f'`{address}`' if address else '（`〜@webex.bot`）'} を入力して追加\n"
+        "4. 追加できたら、この画面を再読み込みする")
+    if not address:
+        st.caption("bot のアドレスが取得できませんでした。Developer Portal の bot 詳細で確認できます。")
+
+
+def _render_token_repair(broken: list[str]) -> None:
+    """無効なトークンを、その場で貼り直せるようにする。"""
+    _render_repair_notice()
+    st.error(f"次のトークンが使えません: {'、'.join(broken)}")
+    _render_regenerate_guide()
+    for name in broken:
+        _render_token_form(name)
+
+
 def render_space_inspector() -> None:
     """bot とスペースの確認タブ: 参加スペースの一覧と、全トークンの有効性。"""
     st.header("bot とスペースの確認")
@@ -805,17 +926,25 @@ def render_space_inspector() -> None:
         configured[sid] = (configured[sid] + "、" + label) if sid in configured else label
 
     st.subheader("スペースとその ID を調べる")
-    token, label = _pick_token(known)
+    _render_repair_notice()
+    token, label, token_var = _pick_token(known)
     if st.button("スペースを取得", key="fetch_spaces", type="primary", disabled=not token):
         with st.spinner("Webex に問い合わせています..."):
             ok, message = core.validate_token(token)
             st.session_state["inspect_error"] = None if ok else f"{message}（{label}）"
+            st.session_state["inspect_var"] = "" if ok else token_var
             st.session_state["inspect_rows"] = (
                 core.space_rows(core.list_spaces(token), configured) if ok else None)
 
     if st.session_state.get("inspect_error"):
         st.error(st.session_state["inspect_error"])
+        broken_var = st.session_state.get("inspect_var")
+        if broken_var:
+            _render_regenerate_guide()
+            _render_token_form(broken_var, key_prefix="inspect_repair")
     rows = st.session_state.get("inspect_rows")
+    if rows is not None and not rows:
+        _render_no_space_help(token)
     if rows:
         st.success(f"{len(rows)} 件のスペースが見つかりました。")
         st.dataframe(rows, width="stretch", hide_index=True)
@@ -824,6 +953,11 @@ def render_space_inspector() -> None:
         _render_env_line_builder(rows)
 
     st.divider()
+    _render_all_token_check()
+
+
+def _render_all_token_check() -> None:
+    """`.env` の全トークンをまとめて確認し、無効なものは貼り直せるようにする。"""
     st.subheader("すべてのトークンを確認")
     st.caption("`.env` にあるトークンを順に試し、有効かどうかと参加スペース数を表示します"
                "（値は表示しません）。")
@@ -831,16 +965,24 @@ def render_space_inspector() -> None:
         with st.spinner("Webex に問い合わせています..."):
             st.session_state["token_rows"] = core.check_all_tokens()
     token_rows = st.session_state.get("token_rows")
-    if token_rows:
-        st.dataframe(token_rows, width="stretch", hide_index=True)
-        broken = [r for r in token_rows if r["状態"] != "有効"]
-        if broken:
-            names = "、".join(r["変数名"] for r in broken)
-            st.error(f"次のトークンが使えません: {names}\n\n"
-                     "Webex Developer Portal で該当 bot のトークンを再発行し、"
-                     "`.env` の該当行を差し替えてください。")
-        else:
-            st.success("すべてのトークンが有効です。")
+    if not token_rows:
+        return
+    st.dataframe(token_rows, width="stretch", hide_index=True)
+    broken = [r["変数名"] for r in token_rows if r["状態"] != "有効"]
+    empty = [r["変数名"] for r in token_rows
+             if r["状態"] == "有効" and r["参加スペース数"] == "0"]
+    if broken:
+        _render_token_repair(broken)
+    else:
+        st.success("すべてのトークンが有効です。")
+    if empty:
+        st.warning(
+            f"次の bot はトークンは有効ですが、**どのスペースにも参加していません**: "
+            f"{'、'.join(empty)}\n\n"
+            "Webex で配信したいスペースを開き、スペース名 →「メンバーを追加」から "
+            "bot のアドレス（`〜@webex.bot`）を追加してください。"
+            "追加するまで、この bot を使うチャンネルは配信先を選べません。",
+            icon=":material/group_add:")
 
 
 def _render_feed_list(existing: core.ExistingConfig) -> tuple[list[str], list[str]]:
@@ -1249,16 +1391,16 @@ def main() -> None:
         if existing:
             st.success(f"既存の設定を読み込みました（{existing.summary}）。"
                        "各ステップに現在の内容が初期値として入っています。", icon=":material/history:")
-        token = render_bot()
-        token = render_token(token)
+        token, token_var = render_bot()
+        token = render_token(token, token_var)
         if not token:
             st.stop()
-        plans = render_channels(categories, existing)
+        plans, removed_names = render_channels(categories, existing)
         if not plans:
             st.warning("配信するスペースを1つ以上選んでください。")
             st.stop()
         feeds = render_feeds(existing)
-        render_write(token, plans, feeds, existing)
+        render_write(token, plans, feeds, existing, removed_names=removed_names)
         render_dry_run()
 
 
