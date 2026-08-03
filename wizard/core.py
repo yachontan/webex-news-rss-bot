@@ -1375,8 +1375,44 @@ def sync_category_names(plans: list[ChannelPlan], path: Path | None = None) -> t
 # 設定の全体像 / Configuration overview
 # ===========================================================
 
-def channel_summary(existing: ExistingConfig | None) -> list[dict]:
-    """チャンネル一覧を画面表示用に整える。"""
+def fetch_space_titles(existing: ExistingConfig | None) -> dict[str, str]:
+    """各チャンネルの宛先スペースの実際の名前を引く。{スペースID: 名前}。
+
+    チャンネルごとに bot トークンが違うため、そのチャンネルのトークンで問い合わせる。
+    取得できなかったものは値を空文字にして返す（画面側で「取得できません」と出す）。
+    """
+    import requests
+
+    from endpoints import get_endpoint
+
+    if existing is None:
+        return {}
+    base = get_endpoint("webex", "rooms")
+    titles: dict[str, str] = {}
+    for channel in existing.all_channels:
+        space_id = _expand_env(channel.get("webex_space_id"))
+        if not space_id or space_id in titles:
+            continue
+        token = _expand_env(channel.get("webex_bot_token")) or get_env_token("WEBEX_BOT_TOKEN")
+        if not token:
+            titles[space_id] = ""
+            continue
+        try:
+            res = requests.get(f"{base}/{space_id}", timeout=15,
+                               headers={"Authorization": f"Bearer {token}"})
+            titles[space_id] = str(res.json().get("title") or "") if res.ok else ""
+        except requests.exceptions.RequestException:
+            titles[space_id] = ""
+    return titles
+
+
+def channel_summary(existing: ExistingConfig | None,
+                    space_titles: dict[str, str] | None = None) -> list[dict]:
+    """チャンネル一覧を画面表示用に整える。
+
+    space_titles を渡すと、宛先スペースの実際の名前を列に足す
+    （設定上のチャンネル名と実際のスペース名が食い違っていないか確かめられる）。
+    """
     if existing is None:
         return []
     rows = []
@@ -1399,13 +1435,17 @@ def channel_summary(existing: ExistingConfig | None) -> list[dict]:
             extras.append("譲る→" + "、".join(str(x) for x in channel["defers_to"]))
         if channel.get("min_japanese") is not None:
             extras.append(f"日本語下限{channel['min_japanese']}")
-        rows.append({
+        row = {
             "チャンネル名": _expand_env(name),
             "種類": kind,
             "送るもの": target,
             "追加の設定": "、".join(extras) or "—",
-            "スペース変数": str(channel.get("webex_space_id") or ""),
-        })
+        }
+        if space_titles is not None:
+            title = space_titles.get(_expand_env(channel.get("webex_space_id")), "")
+            row["投稿先スペース名"] = title.strip() or "（取得できません）"
+        row["スペース変数"] = str(channel.get("webex_space_id") or "")
+        rows.append(row)
     return rows
 
 

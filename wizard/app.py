@@ -760,7 +760,21 @@ def render_overview() -> None:
     _overview_warnings(existing)
 
     st.subheader("配信チャンネル")
-    st.dataframe(core.channel_summary(existing), width="stretch", hide_index=True)
+    st.caption("**チャンネル名は Webex 投稿の見出し**で、スペース名とは別物です。"
+               "下のボタンで、実際にどのスペースへ届くかを確かめられます。")
+    if st.button("投稿先スペース名を取得", key="fetch_titles"):
+        with st.spinner("Webex に問い合わせています..."):
+            st.session_state["space_titles"] = core.fetch_space_titles(existing)
+    titles = st.session_state.get("space_titles")
+    st.dataframe(core.channel_summary(existing, titles), width="stretch", hide_index=True)
+    if titles:
+        mismatched = [r["チャンネル名"] for r in core.channel_summary(existing, titles)
+                      if r["投稿先スペース名"] not in ("（取得できません）", r["チャンネル名"])]
+        if mismatched:
+            st.caption(f":material/info: チャンネル名とスペース名が異なるもの: {'、'.join(mismatched)}。"
+                       "カテゴリ配信のチャンネルは、`categories:` を省略していると"
+                       "**名前がカテゴリ名として使われる**ため、名前を変えるとカテゴリも"
+                       "指定し直す必要があります。")
 
     graph = core.routing_graph(existing)
     if "->" in graph:
