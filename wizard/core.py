@@ -24,6 +24,11 @@ from types import ModuleType
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# リポジトリ直下の endpoints.py を、どの入口から起動されても読めるようにする
+# （streamlit run wizard/app.py のように wizard/ 側だけが sys.path に入る場合がある）。
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 URLS_FILE = REPO_ROOT / "urls.yml"
 CHANNELS_FILE = REPO_ROOT / "channels.yml"
 LEGACY_CONFIG_FILE = REPO_ROOT / "config.yml"
@@ -41,7 +46,8 @@ MIN_PYTHON = (3, 10)
 BOT_CREATE_URL = "https://developer.webex.com/my-apps/new/bot"  # noqa: W02  外部サービスの固定URL
 BOT_DOCS_URL = "https://developer.webex.com/docs/bots"  # noqa: W02  外部サービスの固定URL
 BOT_LIST_URL = "https://developer.webex.com/my-apps"  # noqa: W02  外部サービスの固定URL
-WEBEX_ME_URL = "https://webexapis.com/v1/people/me"  # noqa: W02  外部サービスの固定URL
+# Webex API の宛先は endpoints.yml に集約する。PyYAML を使うため、
+# このモジュールの流儀どおり使う関数の中で遅延 import する。
 
 
 # ===========================================================
@@ -316,11 +322,13 @@ def token_identity(token: str) -> tuple[str, str]:
     """
     import requests
 
+    from endpoints import get_endpoint
+
     token = (token or "").strip()
     if not token:
         return "", ""
     try:
-        response = requests.get(WEBEX_ME_URL, timeout=15,
+        response = requests.get(get_endpoint("webex", "people_me"), timeout=15,
                                 headers={"Authorization": f"Bearer {token}"})
         response.raise_for_status()
     except requests.exceptions.RequestException:
@@ -969,10 +977,8 @@ def default_feed_urls(path: Path | None = None) -> list[str]:
 
 # 受け付けるURLのスキーム（検査用の定数であり、接続先の設定ではない）
 _URL_SCHEMES = ("http://", "https://")  # noqa: W02  URLの検査に使う定数（接続先ではない）
-# 天気API（APIキー不要）。既定値であり、urls.yml で上書きできる。
-WEATHER_API_URL = "https://api.open-meteo.com/v1/forecast"  # noqa: W02  既定値（urls.yml で変更可）
-# 地名から緯度経度を引くAPI（Open-Meteo、APIキー不要）
-GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"  # noqa: W02  外部サービスの固定URL
+# 天気・地名検索のAPI宛先は endpoints.yml に集約する（コードに直書きしない）。
+# 取得は endpoints.get_endpoint("weather", "geocoding") / ("weather", "forecast_default")。
 
 
 def available_groups(path: Path | None = None) -> list[str]:
@@ -1012,11 +1018,13 @@ def geocode_place(name: str, count: int = 5) -> list[dict]:
     """
     import requests
 
+    from endpoints import get_endpoint
+
     query = (name or "").strip()
     if not query:
         return []
     try:
-        res = requests.get(GEOCODING_URL, timeout=15, params={
+        res = requests.get(get_endpoint("weather", "geocoding"), timeout=15, params={
             "name": query, "count": count, "language": "ja", "format": "json"})
         res.raise_for_status()
         items = res.json().get("results") or []
@@ -1038,6 +1046,8 @@ def geocode_place(name: str, count: int = 5) -> list[dict]:
 
 def build_weather_entry(locations: list[dict], api_url: str = "") -> dict:
     """天気エントリを組み立てる（ダイジェストの天気ブロックで使う）。"""
+    from endpoints import get_endpoint
+
     cleaned = []
     for loc in locations:
         label = str(loc.get("label") or "").strip()
@@ -1047,7 +1057,8 @@ def build_weather_entry(locations: list[dict], api_url: str = "") -> dict:
             continue
         if label:
             cleaned.append({"label": label, "lat": lat, "lon": lon})
-    return {"weather": {"api_url": api_url or WEATHER_API_URL, "locations": cleaned}}
+    default_url = get_endpoint("weather", "forecast_default")
+    return {"weather": {"api_url": api_url or default_url, "locations": cleaned}}
 
 
 def validate_feed_url(url: str) -> str:

@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v4.14.0` ／ **Release Date**: 2026-08-01
+**Version**: `v4.18.0` ／ **Release Date**: 2026-08-03
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約・再ランクスクリプト / RSS-to-Webex News Notifier with LLM Summary & Re-ranking**
 
@@ -475,6 +475,14 @@ cp webex-news-rss-bot.plist.example webex-news-rss-bot.plist
 | `categories-private.yml.example` | `categories-private.yml` | — | 社外に出せないキーワードの追加定義 | 自社名などのキーワード |
 | `run_rssbot.sh.example` | `run_rssbot.sh` | — | 自動実行用のラッパー | **編集不要**（`chmod +x` だけ必要） |
 | `webex-news-rss-bot.plist.example` | `webex-news-rss-bot.plist` | — | 自動実行のスケジュール定義 | `__REPO_DIR__` をこのフォルダの絶対パスに置換 |
+
+**コピー不要でそのまま使うファイル**
+
+| ファイル | 何のファイルか |
+|:---|:---|
+| `endpoints.yml` | **外部APIの宛先**（Webex・要約AI・天気）。Git 管理下にあり、コピーも編集も不要です。サービス側が URL を変えたときだけ直します |
+
+> `urls.yml` と `endpoints.yml` は役割が違います。**`urls.yml` は「何を読むか」**（購読するRSS・天気の地点）で、あなたが育てる設定です。**`endpoints.yml` は「どこへ繋ぐか」**（APIの宛先）で、動かすために必要な固定値です。URL をコードに直書きしないため、後者もファイルに出しています。
 
 > **`categories.yml`（カテゴリ判定キーワード）だけは `.example` がありません。** これは Git 管理対象の本体設定で、コピー不要でそのまま使えます。分類を変えたくなったら直接編集してください。  
 > `categories.yml` にも雛形があります。仕分けの語は環境ごとに育てるものなので、Git には example だけを置いています。
@@ -1632,7 +1640,8 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 | Version | 日付 | 何をしたか |
 |:---|:---|:---|
-| **v4.17.0** | 2026-08-03 | **Cisco Security Advisory の CVSS 取得APIのURLを `urls.yml` へ移した**（コードに直書きしない方針の徹底）。`urls.yml` の `cisco_advisory:` エントリに `cvrf_url` を書く形式で、`{adv_id}` が Advisory ID に置き換わる。エントリが無い場合は CVSS バッジを付けずに続行する（警告を1行出す）。ウィザードで `urls.yml` を作り直しても、このエントリはそのまま引き継がれる。 |
+| **v4.18.0** | 2026-08-03 | **外部APIの宛先を `endpoints.yml` に集約した**（URL をコードに直書きしない方針の完了）。Webex（投稿・スペース一覧・bot情報）、要約AI（Claude / OpenAI / Gemini）、天気（地名検索・予報の既定値）の8件を移動。Git 管理下に置いてあるので、コピーも編集も不要でそのまま動きます。サービス側が URL を変えたときは、コードではなくこのファイルを直します。 |
+| v4.17.0 | 2026-08-03 | **Cisco Security Advisory の CVSS 取得APIのURLを `urls.yml` へ移した**（コードに直書きしない方針の徹底）。`urls.yml` の `cisco_advisory:` エントリに `cvrf_url` を書く形式で、`{adv_id}` が Advisory ID に置き換わる。エントリが無い場合は CVSS バッジを付けずに続行する（警告を1行出す）。ウィザードで `urls.yml` を作り直しても、このエントリはそのまま引き継がれる。 |
 | **v4.16.1** | 2026-08-03 | **不具合修正**: ウィザードが生成する `channels.yml` で、チャンネル名などを引用符なしで書いていた。`News Today : 天気とサマリー` のように **`: `（コロン+空白）を含む名前を付けると YAML として壊れ、設定ファイル全体が読めなくなる**（全チャンネルの配信が停止し、ウィザードも「まだ設定がありません」と表示する）。引用の要否を PyYAML に判定させる形に修正。`${VAR}` 参照や通常の名前は引用されないため、見た目は変わらない。`defers_to` / `source_groups` / `categories` / 天気の地点名にも同じ処理を適用。 |
 | v4.16.0 | 2026-08-03 | トークンの貼り直しを**セットアップタブからもできる**ようにした。v4.15.0 では「bot とスペース」タブで「まとめて確認」を押した後にしか出ず、実際に詰まる場所（セットアップでトークンを選んだ直後）に導線が無かった。あわせて「スペースを取得」の失敗時にもその場で直せるようにし、エラーに**どの変数が無効か**を表示するようにした。**bot がどのスペースにも参加していない場合**は、bot のアドレス（`〜@webex.bot`）と追加手順を案内する（セットアップ・トークン一覧・CLI のいずれでも）。 |
 | v4.15.1 | 2026-08-03 | **不具合修正**: ブラウザUIでチャンネルの「削除」にチェックを入れて保存しても、そのチャンネルが `channels.yml` に残り続けていた。削除されたチャンネルは書き出し一覧から外れるため、「今回編集しなかったチャンネルはそのまま残す」処理が**削除と未編集を区別できず**、原文のまま復活させていた。削除された名前を明示的に受け取るようにして修正。保存前の確認画面に「次の N 件を設定から削除します」を表示するようにした（Webex のスペースと bot は消えません）。 |

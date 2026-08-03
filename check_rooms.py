@@ -21,10 +21,13 @@ import argparse
 import getpass
 import os
 import sys
+from pathlib import Path
 
 import requests
 
-WEBEX_ROOMS_URL = "https://webexapis.com/v1/rooms"
+# 単体実行（python check_rooms.py）でもリポジトリ直下を読めるようにする
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from endpoints import get_endpoint  # noqa: E402  sys.path を通してから読み込む
 
 
 def list_rooms(token: str, max_rooms: int = 1000) -> list[dict]:
@@ -36,7 +39,8 @@ def list_rooms(token: str, max_rooms: int = 1000) -> list[dict]:
     """
     headers = {"Authorization": f"Bearer {token}"}
     response = requests.get(
-        WEBEX_ROOMS_URL, headers=headers, params={"max": max_rooms}, timeout=15
+        get_endpoint("webex", "rooms"), headers=headers,
+        params={"max": max_rooms}, timeout=15
     )
     response.raise_for_status()
     return response.json().get("items", [])

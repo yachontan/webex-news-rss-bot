@@ -1,0 +1,29 @@
+# ============================================================
+# endpoints.yml  —  外部サービスのAPIエンドポイント
+#   URL はコードに直書きせず、この1か所に集約する。
+#
+#   urls.yml との違い / How this differs from urls.yml:
+#     urls.yml       … 購読するRSS・天気の地点など、**利用者が育てる設定**
+#     endpoints.yml  … アプリが動くために必要な**固定の宛先**。通常は編集しない
+#
+#   サービス側がURLを変更した場合は、コードではなくここを直す。
+# ============================================================
+
+webex:
+  messages:  https://webexapis.com/v1/messages     # メッセージ投稿
+  rooms:     https://webexapis.com/v1/rooms        # スペース一覧の取得
+  people_me: https://webexapis.com/v1/people/me    # bot 自身の情報（表示名・アドレス）
+
+llm:
+  # 要約・再ランクに使う。どれを使うかは .env の LLM_PROVIDER で決まる。
+  anthropic: https://api.anthropic.com/v1/messages
+  openai:    https://api.openai.com/v1/chat/completions
+  # gemini はこのURLの後ろに `/{モデル名}:generateContent` を付けて呼ぶ
+  gemini:    https://generativelanguage.googleapis.com/v1beta/models
+
+weather:
+  # ウィザードが「地名 → 緯度経度」を引くときに使う（APIキー不要）
+  geocoding:        https://geocoding-api.open-meteo.com/v1/search
+  # 天気予報APIの既定値。ウィザードが urls.yml の weather.api_url に書き込む。
+  # 実際に予報を取りに行く先は urls.yml 側の値なので、変更はそちらで行う。
+  forecast_default: https://api.open-meteo.com/v1/forecast

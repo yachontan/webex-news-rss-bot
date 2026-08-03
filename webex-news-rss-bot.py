@@ -32,6 +32,8 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
+from endpoints import get_endpoint  # 外部APIの宛先は endpoints.yml から読む
+
 # --- 環境変数の読み込み / Load environment variables ---
 # override=True: シェル側に空文字などで既存セットされていても .env の値で上書きする。
 # これがないと、たとえば shell 環境に ANTHROPIC_API_KEY='' があるだけで
@@ -296,11 +298,8 @@ def load_regions_config(path: str = REGIONS_FILE) -> dict | None:
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").strip().lower() or "anthropic"
 
-LLM_ENDPOINTS = {
-    "anthropic": "https://api.anthropic.com/v1/messages",
-    "openai": "https://api.openai.com/v1/chat/completions",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta/models",
-}
+# エンドポイントURLは endpoints.yml に集約する（コードに直書きしない）。
+# 取得は endpoints.get_endpoint("llm", <プロバイダ名>)。
 LLM_KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -323,17 +322,18 @@ def call_llm(prompt: str, api_key: str, model: str, max_tokens: int = 140,
     """
     name = (provider or LLM_PROVIDER).lower()
     if name == "openai":
-        url = LLM_ENDPOINTS["openai"]
+        url = get_endpoint("llm", "openai")
         headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
         payload = {"model": model, "max_completion_tokens": max_tokens,
                    "messages": [{"role": "user", "content": prompt}]}
     elif name == "gemini":
-        url = f"{LLM_ENDPOINTS['gemini']}/{model}:generateContent"
+        # gemini だけ、エンドポイントの後ろにモデル名と動詞を付けて呼ぶ
+        url = f"{get_endpoint('llm', 'gemini')}/{model}:generateContent"
         headers = {"x-goog-api-key": api_key, "content-type": "application/json"}
         payload = {"contents": [{"parts": [{"text": prompt}]}],
                    "generationConfig": {"maxOutputTokens": max_tokens}}
     else:
-        url = LLM_ENDPOINTS["anthropic"]
+        url = get_endpoint("llm", "anthropic")
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01",
                    "content-type": "application/json"}
         payload = {"model": model, "max_tokens": max_tokens,
@@ -1540,7 +1540,7 @@ def send_webex_message(room_id: str, message_text: str, bot_token: str) -> bool:
     Webexスペースにメッセージを送信します。
     Sends a Markdown message to the specified Webex space.
     """
-    url = "https://webexapis.com/v1/messages"
+    url = get_endpoint("webex", "messages")
     headers = {
         "Authorization": f"Bearer {bot_token}",
         "Content-Type":  "application/json",
