@@ -24,6 +24,11 @@ from types import ModuleType
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# リポジトリ直下の endpoints.py を、どの入口から起動されても読めるようにする
+# （streamlit run wizard/app.py のように wizard/ 側だけが sys.path に入る場合がある）。
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 URLS_FILE = REPO_ROOT / "urls.yml"
 CHANNELS_FILE = REPO_ROOT / "channels.yml"
 LEGACY_CONFIG_FILE = REPO_ROOT / "config.yml"
@@ -41,7 +46,8 @@ MIN_PYTHON = (3, 10)
 BOT_CREATE_URL = "https://developer.webex.com/my-apps/new/bot"  # noqa: W02  外部サービスの固定URL
 BOT_DOCS_URL = "https://developer.webex.com/docs/bots"  # noqa: W02  外部サービスの固定URL
 BOT_LIST_URL = "https://developer.webex.com/my-apps"  # noqa: W02  外部サービスの固定URL
-WEBEX_ME_URL = "https://webexapis.com/v1/people/me"  # noqa: W02  外部サービスの固定URL
+# Webex API の宛先は endpoints.yml に集約する。PyYAML を使うため、
+# このモジュールの流儀どおり使う関数の中で遅延 import する。
 
 
 # ===========================================================
@@ -316,11 +322,13 @@ def token_identity(token: str) -> tuple[str, str]:
     """
     import requests
 
+    from endpoints import get_endpoint
+
     token = (token or "").strip()
     if not token:
         return "", ""
     try:
-        response = requests.get(WEBEX_ME_URL, timeout=15,
+        response = requests.get(get_endpoint("webex", "people_me"), timeout=15,
                                 headers={"Authorization": f"Bearer {token}"})
         response.raise_for_status()
     except requests.exceptions.RequestException:
@@ -475,6 +483,12 @@ class ChannelPlan:
     priority: bool = False
     # urls.yml の名前付きグループ。指定するとそのフィード由来の記事だけを専有配信する
     source_groups: list[str] = field(default_factory=list)
+    # ダイジェストに載せる枠と順番（is_digest のときだけ使う）。None なら既定。
+    digest_blocks: list[str] | None = None
+    # 天気の見せ方（table / list）。空なら本体の既定（表形式）。
+    weather_format: str = ""
+    # 1回に投稿する記事数の上限。None なら本体の既定（15件）。
+    max_items: int | None = None
 
     @property
     def suffix(self) -> str:
@@ -551,7 +565,21 @@ def _slug(text: str) -> str:
 # ウィザードが画面上で組み立てられるキー。これ以外を持つチャンネルは
 # 中身を理解できないため、編集せず原文のまま引き継ぐ。
 SIMPLE_CHANNEL_KEYS = {"name", "webex_space_id", "webex_bot_token", "categories",
-                       "digest", "defers_to", "min_japanese", "priority", "source_groups"}
+                       "digest", "defers_to", "min_japanese", "priority", "source_groups",
+                       "digest_blocks", "weather_format", "max_items"}
+
+# ダイジェストに載せられる枠（本体の DIGEST_BLOCK_NAMES と揃える）
+DIGEST_BLOCKS = {
+    "weather": "天気（今日・明日）",
+    "channels": "各チャンネルの投稿まとめ",
+    "jiji": "時事ダイジェスト（地域バランス）",
+}
+DEFAULT_DIGEST_BLOCKS = ["weather", "channels"]
+WEATHER_STYLES = {"table": "表形式（見比べやすい）", "list": "箇条書き（折り返して読める）"}
+
+# 1回に投稿する記事数の上限（本体の MAX_ITEMS_DEFAULT / MAX_ITEMS_LIMIT と揃える）
+MAX_ITEMS_DEFAULT = 15
+MAX_ITEMS_LIMIT = 50
 
 
 @dataclass
@@ -653,6 +681,10 @@ def _absorb_channel(result: ExistingConfig, channel: dict) -> None:
         "defers_to": [str(x) for x in (channel.get("defers_to") or [])],
         "min_japanese": channel.get("min_japanese"),
         "priority": bool(channel.get("priority")),
+        "digest_blocks": ([str(x) for x in channel["digest_blocks"]]
+                          if isinstance(channel.get("digest_blocks"), list) else None),
+        "weather_format": str(channel.get("weather_format") or ""),
+        "max_items": channel.get("max_items"),
     }
     token_ref = str(channel.get("webex_bot_token") or "")
     if token_ref:
@@ -930,6 +962,9 @@ def build_channels_text(channels: list[ChannelPlan],
         if plan.defers_to:
             body.append("    defers_to:           # 下記チャンネルにも該当する記事は、そちらに譲る")
             body.extend(f"      - {_yaml_scalar(target)}" for target in plan.defers_to)
+        if plan.max_items is not None:
+            body.append(f"    max_items: {plan.max_items}"
+                        "         # このスペースに1回で投稿する記事数の上限")
         if plan.min_japanese is not None:
             body.append(f"    min_japanese: {plan.min_japanese}"
                         "      # 日本語記事がこの件数を下回ったら新着順に補充する")
@@ -937,8 +972,15 @@ def build_channels_text(channels: list[ChannelPlan],
             body.append("    source_groups:       # urls.yml のグループ由来の記事だけを専有配信")
             body.extend(f"      - {_yaml_scalar(group)}" for group in plan.source_groups)
         if plan.is_digest:
-            body.append("    digest: true         # 天気＋各チャンネルの投稿まとめを1通に集約")
+            body.append("    digest: true         # まとめを1通に集約して投稿する")
             body.append("    categories: []       # 自分ではニュースを集めない")
+            if plan.digest_blocks is not None:
+                labels = "、".join(DIGEST_BLOCKS.get(b, b) for b in plan.digest_blocks)
+                body.append(f"    digest_blocks:       # 載せる枠と順番（{labels or 'なし'}）")
+                body.extend(f"      - {_yaml_scalar(b)}" for b in plan.digest_blocks)
+            if plan.weather_format:
+                body.append(f"    weather_format: {_yaml_scalar(plan.weather_format)}"
+                            "   # table=表形式 / list=箇条書き")
         elif plan.source_groups and not plan.categories:
             body.append("    categories: []       # グループ指定のみで振り分ける")
         elif not plan.omits_categories:
@@ -949,6 +991,32 @@ def build_channels_text(channels: list[ChannelPlan],
         body.append("  # 既存の設定をそのまま引き継ぎ（優先配信・譲渡・ダイジェスト等）")
         body.extend(_dump_entry(channel))
     return "\n".join(header + body).rstrip() + "\n"
+
+
+def channels_text_with_digest_blocks(existing: ExistingConfig,
+                                     choices: dict[str, dict]) -> str:
+    """ダイジェストチャンネルの枠設定だけを差し替えた channels.yml を組み立てる。
+
+    choices は {チャンネル名（原文）: {digest_blocks, weather_format}}。
+    それ以外のチャンネルと設定は**原文のまま**書き出すため、この画面から
+    他のチャンネルの内容が変わることはない。
+    """
+    updated = []
+    for channel in existing.all_channels:
+        raw_name = str(channel.get("name") or "")
+        picked = choices.get(raw_name)
+        if picked is None:
+            updated.append(channel)
+            continue
+        merged = dict(channel)
+        merged["digest_blocks"] = list(picked.get("digest_blocks") or [])
+        style = str(picked.get("weather_format") or "").strip()
+        if style:
+            merged["weather_format"] = style
+        else:
+            merged.pop("weather_format", None)
+        updated.append(merged)
+    return build_channels_text([], kept_channels=updated)
 
 
 def default_feed_urls(path: Path | None = None) -> list[str]:
@@ -969,10 +1037,8 @@ def default_feed_urls(path: Path | None = None) -> list[str]:
 
 # 受け付けるURLのスキーム（検査用の定数であり、接続先の設定ではない）
 _URL_SCHEMES = ("http://", "https://")  # noqa: W02  URLの検査に使う定数（接続先ではない）
-# 天気API（APIキー不要）。既定値であり、urls.yml で上書きできる。
-WEATHER_API_URL = "https://api.open-meteo.com/v1/forecast"  # noqa: W02  既定値（urls.yml で変更可）
-# 地名から緯度経度を引くAPI（Open-Meteo、APIキー不要）
-GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"  # noqa: W02  外部サービスの固定URL
+# 天気・地名検索のAPI宛先は endpoints.yml に集約する（コードに直書きしない）。
+# 取得は endpoints.get_endpoint("weather", "geocoding") / ("weather", "forecast_default")。
 
 
 def available_groups(path: Path | None = None) -> list[str]:
@@ -1012,11 +1078,13 @@ def geocode_place(name: str, count: int = 5) -> list[dict]:
     """
     import requests
 
+    from endpoints import get_endpoint
+
     query = (name or "").strip()
     if not query:
         return []
     try:
-        res = requests.get(GEOCODING_URL, timeout=15, params={
+        res = requests.get(get_endpoint("weather", "geocoding"), timeout=15, params={
             "name": query, "count": count, "language": "ja", "format": "json"})
         res.raise_for_status()
         items = res.json().get("results") or []
@@ -1038,6 +1106,8 @@ def geocode_place(name: str, count: int = 5) -> list[dict]:
 
 def build_weather_entry(locations: list[dict], api_url: str = "") -> dict:
     """天気エントリを組み立てる（ダイジェストの天気ブロックで使う）。"""
+    from endpoints import get_endpoint
+
     cleaned = []
     for loc in locations:
         label = str(loc.get("label") or "").strip()
@@ -1047,7 +1117,8 @@ def build_weather_entry(locations: list[dict], api_url: str = "") -> dict:
             continue
         if label:
             cleaned.append({"label": label, "lat": lat, "lon": lon})
-    return {"weather": {"api_url": api_url or WEATHER_API_URL, "locations": cleaned}}
+    default_url = get_endpoint("weather", "forecast_default")
+    return {"weather": {"api_url": api_url or default_url, "locations": cleaned}}
 
 
 def validate_feed_url(url: str) -> str:
@@ -1340,8 +1411,44 @@ def sync_category_names(plans: list[ChannelPlan], path: Path | None = None) -> t
 # 設定の全体像 / Configuration overview
 # ===========================================================
 
-def channel_summary(existing: ExistingConfig | None) -> list[dict]:
-    """チャンネル一覧を画面表示用に整える。"""
+def fetch_space_titles(existing: ExistingConfig | None) -> dict[str, str]:
+    """各チャンネルの宛先スペースの実際の名前を引く。{スペースID: 名前}。
+
+    チャンネルごとに bot トークンが違うため、そのチャンネルのトークンで問い合わせる。
+    取得できなかったものは値を空文字にして返す（画面側で「取得できません」と出す）。
+    """
+    import requests
+
+    from endpoints import get_endpoint
+
+    if existing is None:
+        return {}
+    base = get_endpoint("webex", "rooms")
+    titles: dict[str, str] = {}
+    for channel in existing.all_channels:
+        space_id = _expand_env(channel.get("webex_space_id"))
+        if not space_id or space_id in titles:
+            continue
+        token = _expand_env(channel.get("webex_bot_token")) or get_env_token("WEBEX_BOT_TOKEN")
+        if not token:
+            titles[space_id] = ""
+            continue
+        try:
+            res = requests.get(f"{base}/{space_id}", timeout=15,
+                               headers={"Authorization": f"Bearer {token}"})
+            titles[space_id] = str(res.json().get("title") or "") if res.ok else ""
+        except requests.exceptions.RequestException:
+            titles[space_id] = ""
+    return titles
+
+
+def channel_summary(existing: ExistingConfig | None,
+                    space_titles: dict[str, str] | None = None) -> list[dict]:
+    """チャンネル一覧を画面表示用に整える。
+
+    space_titles を渡すと、宛先スペースの実際の名前を列に足す
+    （設定上のチャンネル名と実際のスペース名が食い違っていないか確かめられる）。
+    """
     if existing is None:
         return []
     rows = []
@@ -1364,13 +1471,17 @@ def channel_summary(existing: ExistingConfig | None) -> list[dict]:
             extras.append("譲る→" + "、".join(str(x) for x in channel["defers_to"]))
         if channel.get("min_japanese") is not None:
             extras.append(f"日本語下限{channel['min_japanese']}")
-        rows.append({
+        row = {
             "チャンネル名": _expand_env(name),
             "種類": kind,
             "送るもの": target,
             "追加の設定": "、".join(extras) or "—",
-            "スペース変数": str(channel.get("webex_space_id") or ""),
-        })
+        }
+        if space_titles is not None:
+            title = space_titles.get(_expand_env(channel.get("webex_space_id")), "")
+            row["投稿先スペース名"] = title.strip() or "（取得できません）"
+        row["スペース変数"] = str(channel.get("webex_space_id") or "")
+        rows.append(row)
     return rows
 
 
@@ -1487,6 +1598,72 @@ WEEKDAY_LABELS = ["月", "火", "水", "木", "金", "土", "日"]
 _MAC_WEEKDAY = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 0}   # 月=1 … 日=0
 _WIN_WEEKDAY = {0: "MON", 1: "TUE", 2: "WED", 3: "THU", 4: "FRI", 5: "SAT", 6: "SUN"}
 
+OS_MACOS, OS_WINDOWS, OS_LINUX, OS_OTHER = "macos", "windows", "linux", "other"
+
+
+def current_os() -> str:
+    """いま動いている OS を返す。判定はここ1箇所に集約する。
+
+    以前は `platform.system() == "Windows"` かどうかだけで分岐しており、
+    **Linux などが macOS 扱い**になっていた（`~/Library/LaunchAgents` に plist を
+    書いて `launchctl` を呼ぼうとして、原因の分からないエラーになる）。
+    """
+    return {"Darwin": OS_MACOS, "Windows": OS_WINDOWS,
+            "Linux": OS_LINUX}.get(platform.system(), OS_OTHER)
+
+
+def os_label() -> str:
+    """画面に出す OS 名。"""
+    return {OS_MACOS: "macOS", OS_WINDOWS: "Windows",
+            OS_LINUX: "Linux"}.get(current_os(), platform.system() or "不明な OS")
+
+
+@dataclass
+class SchedulerInfo:
+    """この OS で自動実行をどう登録するか。supported=False なら登録できない。"""
+
+    supported: bool
+    mechanism: str        # 使う仕組みの名前
+    where: str            # 登録先（利用者が自分で確認できる場所）
+    runner: str           # 定時実行から呼ばれるファイル
+    note: str = ""        # その OS 固有の注意
+
+
+def scheduler_info() -> SchedulerInfo:
+    """OS ごとの自動実行の仕組みを返す。"""
+    system = current_os()
+    if system == OS_MACOS:
+        return SchedulerInfo(
+            supported=True, mechanism="launchd", runner="run_rssbot.sh",
+            where=f"~/Library/LaunchAgents/{SCHEDULE_LABEL}.plist",
+            note="launchd は Mac がスリープ中だと起動しません。"
+                 "`sudo pmset repeat wakeorpoweron MTWRF 08:55:00` のように、"
+                 "実行時刻の少し前に自動で起きるよう設定しておくと確実です。")
+    if system == OS_WINDOWS:
+        return SchedulerInfo(
+            supported=True, mechanism="タスク スケジューラ", runner="run_rssbot.bat",
+            where=f"タスク スケジューラ ライブラリの「{SCHEDULE_TASK_NAME}」",
+            note="スリープからの復帰は既定では行いません。"
+                 "タスクのプロパティ →「条件」→「タスクを実行するためにスリープを解除する」を"
+                 "有効にすると、時刻に合わせて復帰します。")
+    return SchedulerInfo(
+        supported=False, mechanism="（この OS 向けの登録機能はありません）",
+        runner="run_rssbot.sh", where="—",
+        note="cron などに `run_rssbot.sh` を登録してください。"
+             "例: `crontab -e` で `1 9 * * 1-5 " + str(REPO_ROOT / "run_rssbot.sh") + "`")
+
+
+def schtasks_create_command(hour: int, minute: int, weekdays: list[int]) -> list[str]:
+    """Windows のタスク登録コマンドを組み立てる（実行はしない）。
+
+    `/TR` に自分で引用符を付けない。subprocess がリスト要素を適切に引用するため、
+    ここで `"..."` を足すと引用符ごと引数として渡ってしまう。
+    """
+    days = ",".join(_WIN_WEEKDAY[d] for d in sorted(weekdays))
+    return ["schtasks", "/Create", "/TN", SCHEDULE_TASK_NAME,
+            "/TR", str(runner_path()), "/SC", "WEEKLY",
+            "/D", days, "/ST", f"{hour:02d}:{minute:02d}", "/F"]
+
 
 def _plist_path() -> Path:
     """macOS で plist を置く場所。"""
@@ -1495,18 +1672,18 @@ def _plist_path() -> Path:
 
 def runner_path() -> Path:
     """定時実行から呼ぶラッパーのパス（OS ごとに違う）。"""
-    return REPO_ROOT / ("run_rssbot.bat" if platform.system() == "Windows" else "run_rssbot.sh")
+    return REPO_ROOT / scheduler_info().runner
 
 
 def ensure_runner() -> tuple[bool, str]:
     """ラッパーを用意する。無ければ雛形から作り、実行できるようにする。"""
     runner = runner_path()
     if runner.exists():
-        if platform.system() != "Windows":
+        if current_os() != OS_WINDOWS:
             runner.chmod(runner.stat().st_mode | 0o111)
         return True, f"{runner.name} を使います"
     template = REPO_ROOT / "run_rssbot.sh.example"
-    if platform.system() == "Windows" or not template.exists():
+    if current_os() == OS_WINDOWS or not template.exists():
         return False, f"{runner.name} が見つかりません（リポジトリが壊れている可能性があります）"
     try:
         shutil.copyfile(template, runner)
@@ -1568,11 +1745,12 @@ def install_schedule(hour: int, minute: int, weekdays: list[int]) -> tuple[bool,
     if not ok:
         return False, message
 
-    if platform.system() == "Windows":
-        days = ",".join(_WIN_WEEKDAY[d] for d in sorted(weekdays))
-        ok, output = _run(["schtasks", "/Create", "/TN", SCHEDULE_TASK_NAME,
-                           "/TR", f'"{runner_path()}"', "/SC", "WEEKLY",
-                           "/D", days, "/ST", f"{hour:02d}:{minute:02d}", "/F"])
+    info = scheduler_info()
+    if not info.supported:
+        return False, f"{os_label()} では自動実行を登録できません。{info.note}"
+
+    if current_os() == OS_WINDOWS:
+        ok, output = _run(schtasks_create_command(hour, minute, weekdays))
         return ok, output or ("登録しました" if ok else "登録に失敗しました")
 
     path = _plist_path()
@@ -1588,7 +1766,9 @@ def install_schedule(hour: int, minute: int, weekdays: list[int]) -> tuple[bool,
 
 def remove_schedule() -> tuple[bool, str]:
     """登録した自動実行を解除する。"""
-    if platform.system() == "Windows":
+    if not scheduler_info().supported:
+        return False, f"{os_label()} では自動実行を登録できません"
+    if current_os() == OS_WINDOWS:
         ok, output = _run(["schtasks", "/Delete", "/TN", SCHEDULE_TASK_NAME, "/F"])
         return ok, output or ("解除しました" if ok else "解除できませんでした")
     path = _plist_path()
@@ -1603,9 +1783,12 @@ def remove_schedule() -> tuple[bool, str]:
 
 def schedule_status() -> tuple[bool, str]:
     """いま自動実行が登録されているかを調べる。"""
-    if platform.system() == "Windows":
-        ok, output = _run(["schtasks", "/Query", "/TN", SCHEDULE_TASK_NAME])
-        return ok, output if ok else "登録されていません"
+    if not scheduler_info().supported:
+        return False, f"{os_label()} には登録の仕組みがありません"
+    if current_os() == OS_WINDOWS:
+        ok, _ = _run(["schtasks", "/Query", "/TN", SCHEDULE_TASK_NAME])
+        # 出力は表形式で長いため、画面には要約だけを出す
+        return ok, (f"登録済みです（{SCHEDULE_TASK_NAME}）" if ok else "登録されていません")
     path = _plist_path()
     if not path.exists():
         return False, "登録されていません"
@@ -1617,7 +1800,9 @@ def schedule_status() -> tuple[bool, str]:
 
 def run_schedule_now() -> tuple[bool, str]:
     """登録した処理をいますぐ1回実行する（動作確認用）。"""
-    if platform.system() == "Windows":
+    if not scheduler_info().supported:
+        return False, f"{os_label()} には登録の仕組みがありません"
+    if current_os() == OS_WINDOWS:
         return _run(["schtasks", "/Run", "/TN", SCHEDULE_TASK_NAME])
     return _run(["launchctl", "start", SCHEDULE_LABEL])
 

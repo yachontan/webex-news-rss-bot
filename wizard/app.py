@@ -333,6 +333,24 @@ def _render_channel_options(key: str, options: dict, other_names: list[str], kin
             default=[n for n in options.get("defers_to", []) if n in other_names],
             key=f"defer_{key}", disabled=kind == KIND_DIGEST,
             help="ここで選んだチャンネルにも該当する記事は、そちら側だけに配信します。")
+        current_max = options.get("max_items")
+        max_text = st.text_input(
+            "1回に投稿する記事数の上限（max_items）",
+            value="" if current_max is None else str(current_max),
+            key=f"maxitems_{key}", disabled=kind == KIND_DIGEST,
+            placeholder=f"空欄なら {core.MAX_ITEMS_DEFAULT} 件",
+            help=f"これを超えた分は AI が重要そうな順に絞ります（1〜{core.MAX_ITEMS_LIMIT}）。"
+                 "多くすると1通が長くなります。")
+        max_items = None
+        if max_text.strip():
+            if (max_text.strip().isdigit()
+                    and 1 <= int(max_text.strip()) <= core.MAX_ITEMS_LIMIT):
+                max_items = int(max_text.strip())
+            else:
+                st.warning(f"記事数の上限は 1〜{core.MAX_ITEMS_LIMIT} の数字で入力してください"
+                           f"（空欄なら {core.MAX_ITEMS_DEFAULT} 件）。",
+                           icon=":material/warning:")
+
         current_min = options.get("min_japanese")
         min_text = st.text_input(
             "日本語記事の下限（min_japanese）",
@@ -346,7 +364,39 @@ def _render_channel_options(key: str, options: dict, other_names: list[str], kin
             else:
                 st.warning("日本語記事の下限は数字で入力してください（空欄なら指定なし）。",
                            icon=":material/warning:")
-    return {"priority": priority, "defers_to": defers, "min_japanese": min_japanese}
+    return {"priority": priority, "defers_to": defers, "min_japanese": min_japanese,
+            "max_items": max_items}
+
+
+def _render_digest_options(key: str, options: dict) -> dict:
+    """ダイジェストに載せる枠と、天気の見せ方を選ぶ。"""
+    st.markdown("**ダイジェストに載せるもの**")
+    st.caption("チェックした順ではなく、下に並んでいる順で投稿されます。")
+    current = options.get("digest_blocks")
+    if current is None:
+        current = list(core.DEFAULT_DIGEST_BLOCKS)
+    chosen = []
+    for name, label in core.DIGEST_BLOCKS.items():
+        if st.checkbox(label, value=name in current, key=f"blk_{key}_{name}"):
+            chosen.append(name)
+    if not chosen:
+        st.warning("1つも選ばれていません。このままだと日付の見出しだけが投稿されます。",
+                   icon=":material/warning:")
+
+    style_keys = list(core.WEATHER_STYLES)
+    current_style = (options.get("weather_format") or "table").lower()
+    if current_style not in style_keys:
+        current_style = "table"
+    style = st.radio(
+        "天気の見せ方", style_keys,
+        index=style_keys.index(current_style),
+        format_func=lambda k: core.WEATHER_STYLES[k],
+        key=f"wfmt_{key}", horizontal=True,
+        disabled="weather" not in chosen,
+        help="表形式は地点を見比べやすく、箇条書きはスマホで折り返して読めます。")
+    st.caption("Webex は Markdown の表に対応していないため、表形式は等幅のコードブロックで描きます。"
+               "地点や列が多いとスマホでは横スクロールになります。")
+    return {"digest_blocks": chosen, "weather_format": style}
 
 
 def _render_channel_card(key: str, name: str, space_id: str, space_label: str,
@@ -380,6 +430,10 @@ def _render_channel_card(key: str, name: str, space_id: str, space_label: str,
                                     default=current_kind, key=f"kind_{key}") or KIND_NEWS
         chosen, groups = _render_target_picker(key, new_name, categories, current_cats,
                                                options.get("source_groups", []), kind)
+        if kind == KIND_DIGEST:
+            st.caption(":material/tune: **載せる枠（天気／各チャンネルのまとめ／時事）と"
+                       "天気の見せ方は「ダイジェスト」タブ**で選びます。"
+                       "ここで保存しても、その設定はそのまま引き継がれます。")
         adv = _render_channel_options(key, options, other_names, kind)
 
     if not new_name.strip():
@@ -392,7 +446,12 @@ def _render_channel_card(key: str, name: str, space_id: str, space_label: str,
         name=new_name.strip(), categories=chosen, space_id=space_id, space_title=space_label,
         bot_token_ref=token_ref, space_ref=space_ref, is_digest=(kind == KIND_DIGEST),
         source_groups=groups,
-        defers_to=adv["defers_to"], min_japanese=adv["min_japanese"], priority=adv["priority"])
+        defers_to=adv["defers_to"], min_japanese=adv["min_japanese"], priority=adv["priority"],
+        # 枠の設定は「ダイジェスト」タブが持ち主。ここでは既存値をそのまま通す
+        # （通さないと、セットアップから保存したときに設定が消える）。
+        max_items=adv["max_items"],
+        digest_blocks=options.get("digest_blocks"),
+        weather_format=str(options.get("weather_format") or ""))
 
 
 def render_feeds(existing: core.ExistingConfig | None) -> list[str]:
@@ -726,7 +785,21 @@ def render_overview() -> None:
     _overview_warnings(existing)
 
     st.subheader("配信チャンネル")
-    st.dataframe(core.channel_summary(existing), width="stretch", hide_index=True)
+    st.caption("**チャンネル名は Webex 投稿の見出し**で、スペース名とは別物です。"
+               "下のボタンで、実際にどのスペースへ届くかを確かめられます。")
+    if st.button("投稿先スペース名を取得", key="fetch_titles"):
+        with st.spinner("Webex に問い合わせています..."):
+            st.session_state["space_titles"] = core.fetch_space_titles(existing)
+    titles = st.session_state.get("space_titles")
+    st.dataframe(core.channel_summary(existing, titles), width="stretch", hide_index=True)
+    if titles:
+        mismatched = [r["チャンネル名"] for r in core.channel_summary(existing, titles)
+                      if r["投稿先スペース名"] not in ("（取得できません）", r["チャンネル名"])]
+        if mismatched:
+            st.caption(f":material/info: チャンネル名とスペース名が異なるもの: {'、'.join(mismatched)}。"
+                       "カテゴリ配信のチャンネルは、`categories:` を省略していると"
+                       "**名前がカテゴリ名として使われる**ため、名前を変えるとカテゴリも"
+                       "指定し直す必要があります。")
 
     graph = core.routing_graph(existing)
     if "->" in graph:
@@ -768,17 +841,52 @@ def _render_overview_feeds(existing: core.ExistingConfig) -> None:
                    f"その他 {len(regions['keywords']['other'])} 語")
 
 
+def _render_os_block() -> bool:
+    """いまの OS と、そこで使う仕組みを示す。登録できない OS なら False。"""
+    info = core.scheduler_info()
+    if not info.supported:
+        st.warning(f"**{core.os_label()} 向けの登録機能はありません。**\n\n{info.note}",
+                   icon=":material/computer:")
+        st.caption("設定ファイルの作成や dry-run など、他のタブの機能はそのまま使えます。")
+        return False
+    st.info(f"**いま動かしているのは {core.os_label()} です。**\n\n"
+            f"- 使う仕組み: **{info.mechanism}**\n"
+            f"- 登録先: `{info.where}`\n"
+            f"- 定時実行から呼ばれるファイル: `{info.runner}`",
+            icon=":material/computer:")
+    if info.note:
+        st.caption(f":material/lightbulb: {info.note}")
+    return True
+
+
+def _render_location_block() -> bool:
+    """置き場所が自動実行に使えるかを確かめる。使えなければ理由を出して False。
+
+    TCC 保護下（書類・デスクトップ・ダウンロード・iCloud Drive）に置いていると、
+    launchd から設定ファイルを読めず**定時実行だけが静かに失敗する**。
+    手動実行は成功するため気づきにくい。登録させずにここで止める。
+    """
+    location = core.check_location()
+    if location.ok:
+        return True
+    st.error(f"**この置き場所では自動実行を設定できません。**\n\n"
+             f"{location.detail}\n\n{location.hint}", icon=":material/block:")
+    st.caption("いまの場所でも「いますぐ1回実行」や手動実行は動きます。"
+               "動かないのは定時実行だけなので、登録しても気づきにくい失敗になります。")
+    return False
+
+
 def render_scheduler() -> None:
     """自動実行タブ: 毎朝決まった時刻に動かす設定。"""
     st.header("自動実行の設定")
     st.caption("毎朝きまった時刻に、このツールを自動で動かします。"
                "**パソコンの電源が入っていて、スリープしていない**ことが前提です。")
 
-    import platform
-    system = platform.system()
-    mechanism = {"Darwin": "macOS の launchd", "Windows": "Windows のタスク スケジューラ"}.get(
-        system, f"{system}（cron などをお使いください）")
-    st.caption(f"この環境では **{mechanism}** に登録します。")
+    if not _render_os_block():
+        return
+
+    if not _render_location_block():
+        return
 
     registered, detail = core.schedule_status()
     if registered:
@@ -1152,13 +1260,46 @@ def _render_region_editor() -> tuple[dict[str, int], list[str], list[str]]:
     return {"japan": japan, "us": us, "other": other}, us_list, other_list
 
 
+def _render_digest_channel_blocks(existing: core.ExistingConfig | None) -> dict[str, dict]:
+    """ダイジェストチャンネルごとに、載せる枠と天気の見せ方を選ぶ。
+
+    戻り値は {チャンネル名（原文）: {digest_blocks, weather_format}}。
+    """
+    digest_channels = [c for c in (existing.all_channels if existing else [])
+                       if c.get("digest")]
+    st.subheader("ダイジェストに載せるもの")
+    if not digest_channels:
+        st.caption("ダイジェストチャンネルがまだありません。"
+                   "「セットアップ」タブで、送るものに「ダイジェスト」を選んだチャンネルを作ると"
+                   "ここに出ます。")
+        return {}
+
+    st.caption("チェックした順ではなく、下に並んでいる順で投稿されます。")
+    chosen: dict[str, dict] = {}
+    for channel in digest_channels:
+        raw_name = str(channel.get("name") or "")
+        label = core.expand_category_name(raw_name)
+        key = _widget_key(core._expand_env(channel.get("webex_space_id")), raw_name)
+        with st.container(border=True):
+            st.markdown(f"**{label}**")
+            chosen[raw_name] = _render_digest_options(key, {
+                "digest_blocks": (channel["digest_blocks"]
+                                  if isinstance(channel.get("digest_blocks"), list) else None),
+                "weather_format": str(channel.get("weather_format") or ""),
+            })
+    return chosen
+
+
 def render_digest_manager() -> None:
-    """ダイジェストタブ: 天気の地点と、時事ダイジェストの地域バランス。"""
+    """ダイジェストタブ: 載せる枠、天気の地点と見せ方、時事の地域バランス。"""
     st.header("ダイジェストの設定")
-    st.caption("**ダイジェスト（天気＋まとめ）チャンネル**の中身を調整します。"
+    st.caption("**ダイジェストチャンネル**の中身を調整します。"
                "ダイジェストを使っていない場合、この設定は配信に影響しません。")
 
     existing = core.load_existing_config()
+    block_choices = _render_digest_channel_blocks(existing)
+
+    st.divider()
     others = [e for e in (existing.special_feeds if existing else []) if "group" not in e]
     weather_entry = _render_weather_editor(others)
 
@@ -1169,11 +1310,17 @@ def render_digest_manager() -> None:
     files = [core.REGIONS_FILE.name]
     if existing is not None:
         files.insert(0, core.URLS_FILE.name)
+    if block_choices:
+        files.insert(0, core.CHANNELS_FILE.name)
     agreed = _render_change_review({}, files, "digest")
     if st.button("ダイジェストの設定を保存", type="primary", key="save_digest",
                  disabled=not agreed):
         results = []
         try:
+            if block_choices and existing is not None:
+                results.append(core.backup_and_write(
+                    core.CHANNELS_FILE, core.channels_text_with_digest_blocks(
+                        existing, block_choices)))
             if existing is not None:
                 groups = [e for e in existing.special_feeds if "group" in e]
                 rest = [e for e in others if "weather" not in e]

@@ -26,11 +26,14 @@ import argparse
 import yaml
 import random
 import re
+import unicodedata
 
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+from endpoints import get_endpoint  # 外部APIの宛先は endpoints.yml から読む
 
 # --- 環境変数の読み込み / Load environment variables ---
 # override=True: シェル側に空文字などで既存セットされていても .env の値で上書きする。
@@ -61,6 +64,12 @@ CATEGORIES_FILE = os.path.join(_BASE, "categories.yml")
 #   urls.yml     : 収集するRSSフィード（feeds:）
 #   channels.yml : 配信先チャンネル（channels:）
 # Config is split by purpose: urls.yml (feeds) and channels.yml (channels).
+# 1チャンネルに1回で投稿する記事数の上限。channels.yml の max_items で変えられる。
+# これを超えた分は LLM 再ランク（失敗時は stratified_pick）で絞り込む。
+# 既定引数から参照するため、関数定義より前に置く必要がある。
+MAX_ITEMS_DEFAULT = 15
+MAX_ITEMS_LIMIT = 50      # 多すぎると1通が長大になり Webex 側で分割される
+
 URLS_FILE       = os.path.join(_BASE, "urls.yml")
 CHANNELS_FILE   = os.path.join(_BASE, "channels.yml")
 # 旧構成（1ファイルにまとめていた頃）。両方が無い場合の後方互換として読む。
@@ -296,11 +305,8 @@ def load_regions_config(path: str = REGIONS_FILE) -> dict | None:
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").strip().lower() or "anthropic"
 
-LLM_ENDPOINTS = {
-    "anthropic": "https://api.anthropic.com/v1/messages",
-    "openai": "https://api.openai.com/v1/chat/completions",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta/models",
-}
+# エンドポイントURLは endpoints.yml に集約する（コードに直書きしない）。
+# 取得は endpoints.get_endpoint("llm", <プロバイダ名>)。
 LLM_KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -323,17 +329,18 @@ def call_llm(prompt: str, api_key: str, model: str, max_tokens: int = 140,
     """
     name = (provider or LLM_PROVIDER).lower()
     if name == "openai":
-        url = LLM_ENDPOINTS["openai"]
+        url = get_endpoint("llm", "openai")
         headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
         payload = {"model": model, "max_completion_tokens": max_tokens,
                    "messages": [{"role": "user", "content": prompt}]}
     elif name == "gemini":
-        url = f"{LLM_ENDPOINTS['gemini']}/{model}:generateContent"
+        # gemini だけ、エンドポイントの後ろにモデル名と動詞を付けて呼ぶ
+        url = f"{get_endpoint('llm', 'gemini')}/{model}:generateContent"
         headers = {"x-goog-api-key": api_key, "content-type": "application/json"}
         payload = {"contents": [{"parts": [{"text": prompt}]}],
                    "generationConfig": {"maxOutputTokens": max_tokens}}
     else:
-        url = LLM_ENDPOINTS["anthropic"]
+        url = get_endpoint("llm", "anthropic")
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01",
                    "content-type": "application/json"}
         payload = {"model": model, "max_tokens": max_tokens,
@@ -637,8 +644,9 @@ def fetch_weather(api_url: str, label: str, lat: float, lon: float) -> dict | No
     params = {
         "latitude":  lat,
         "longitude": lon,
-        "current":   "temperature_2m,weather_code",
-        "daily":     "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        "current":   "temperature_2m,relative_humidity_2m,weather_code",
+        "daily":     ("weather_code,temperature_2m_max,temperature_2m_min,"
+                      "precipitation_probability_max,relative_humidity_2m_mean"),
         "timezone":  "Asia/Tokyo",
         "forecast_days": 2,
     }
@@ -655,6 +663,7 @@ def fetch_weather(api_url: str, label: str, lat: float, lon: float) -> dict | No
     tmax  = daily.get("temperature_2m_max") or []
     tmin  = daily.get("temperature_2m_min") or []
     pop   = daily.get("precipitation_probability_max") or []
+    hum   = daily.get("relative_humidity_2m_mean") or []
 
     def _day(i: int) -> dict | None:
         if i >= len(codes):
@@ -664,14 +673,16 @@ def fetch_weather(api_url: str, label: str, lat: float, lon: float) -> dict | No
             "tmax": tmax[i] if i < len(tmax) else None,
             "tmin": tmin[i] if i < len(tmin) else None,
             "pop":  pop[i]  if i < len(pop)  else None,
+            "hum":  hum[i]  if i < len(hum)  else None,
         }
 
     current = data.get("current") or {}
     return {
-        "label":        label,
-        "current_temp": current.get("temperature_2m"),
-        "today":        _day(0),
-        "tomorrow":     _day(1),
+        "label":           label,
+        "current_temp":    current.get("temperature_2m"),
+        "current_humidity": current.get("relative_humidity_2m"),
+        "today":           _day(0),
+        "tomorrow":        _day(1),
     }
 
 
@@ -688,22 +699,120 @@ def _format_day(day: dict | None) -> str:
     else:
         temp = ""
     pop_str = f" ☔{round(pop)}%" if pop is not None else ""
-    return f"{emoji}{name}{temp}{pop_str}"
+    hum = day.get("hum")
+    hum_str = f" 💧{round(hum)}%" if hum is not None else ""
+    return f"{emoji}{name}{temp}{pop_str}{hum_str}"
+
+
+def _display_width(text: str) -> int:
+    """等幅フォントでの表示幅を数える（全角=2、半角=1）。
+
+    Webex はコードブロック内を等幅で表示するため、桁を揃えるには
+    文字数ではなく**表示幅**で数える必要がある。日本語の地名（全角）と
+    絵文字はどちらも2桁分を占める。
+    """
+    width = 0
+    for ch in text:
+        code = ord(ch)
+        if ch == "️":
+            # 異体字セレクタ。直前の記号を絵文字表示（2桁）へ格上げする印で、
+            # それ自体は字形を持たない。格上げ分の +1 をここで足す。
+            width += 1
+        elif unicodedata.combining(ch):
+            width += 0
+        elif unicodedata.east_asian_width(ch) in ("W", "F"):
+            width += 2      # 全角（日本語など）と、絵文字の多く
+        elif 0x1F300 <= code <= 0x1FAFF:
+            width += 2      # east_asian_width が判定できない絵文字
+        else:
+            width += 1
+    return width
+
+
+def _pad(text: str, width: int) -> str:
+    """表示幅が width になるよう右側を空白で埋める（超過時はそのまま返す）。"""
+    return text + " " * max(0, width - _display_width(text))
+
+
+def _day_cell(day: dict | None) -> str:
+    """表の1マス分。「🌦 26/22° ☔90% 💧74%」形式。"""
+    if not day:
+        return "—"
+    emoji, _ = _wmo_label(day.get("code"))
+    tmax, tmin = day.get("tmax"), day.get("tmin")
+    if tmax is not None and tmin is not None:
+        temp = f"{round(tmax)}/{round(tmin)}°"
+    elif tmax is not None:
+        temp = f"{round(tmax)}°"
+    else:
+        temp = "—"
+    pop, hum = day.get("pop"), day.get("hum")
+    pop_str = f" ☔{round(pop):>3}%" if pop is not None else ""
+    hum_str = f" 💧{round(hum):>3}%" if hum is not None else ""
+    return f"{emoji} {temp}{pop_str}{hum_str}"
+
+
+def format_weather_table(results: list[dict]) -> str:
+    """天気を等幅の表に整形する。
+
+    Webex は Markdown の表に対応していないため、コードブロック内で桁を揃えて
+    「表に見えるもの」を作る（公式に案内されている回避策）。
+    """
+    results = [r for r in results if r]
+    if not results:
+        return ""
+
+    rows = []
+    for r in results:
+        temp = r.get("current_temp")
+        hum = r.get("current_humidity")
+        now = "—"
+        if temp is not None:
+            now = f"{round(temp)}°"
+            if hum is not None:
+                now += f" {round(hum)}%"
+        rows.append([str(r["label"]), now,
+                     _day_cell(r.get("today")), _day_cell(r.get("tomorrow"))])
+
+    header = ["地点", "現在", "今日", "明日"]
+    widths = [max(_display_width(row[i]) for row in [header, *rows]) for i in range(4)]
+    sep = "─" * (sum(widths) + 6)
+
+    lines = ["🌤 **今日・明日の天気**", "```"]
+    lines.append("  ".join(_pad(header[i], widths[i]) for i in range(4)).rstrip())
+    lines.append(sep)
+    for row in rows:
+        lines.append("  ".join(_pad(row[i], widths[i]) for i in range(4)).rstrip())
+    lines.append("```")
+    lines.append("　気温は最高/最低、☔は降水確率、💧は平均湿度です。")
+    return "\n".join(lines)
 
 
 def format_weather_block(results: list[dict]) -> str:
-    """天気結果リストを Markdown ブロックに整形する。全滅（空）なら空文字を返す。"""
+    """天気結果リストを Markdown の箇条書きに整形する。全滅（空）なら空文字を返す。"""
     results = [r for r in results if r]
     if not results:
         return ""
     lines = ["🌤 **今日・明日の天気**"]
     for r in results:
-        cur = f"（現在 {round(r['current_temp'])}°）" if r.get("current_temp") is not None else ""
+        cur = ""
+        if r.get("current_temp") is not None:
+            cur = f"（現在 {round(r['current_temp'])}°"
+            if r.get("current_humidity") is not None:
+                cur += f"・湿度 {round(r['current_humidity'])}%"
+            cur += "）"
         lines.append(
             f"- **{r['label']}**{cur}\n"
             f"　　今日: {_format_day(r.get('today'))}　／　明日: {_format_day(r.get('tomorrow'))}"
         )
     return "\n".join(lines)
+
+
+def format_weather(results: list[dict], style: str = "table") -> str:
+    """設定に応じて表形式・箇条書きのどちらかで天気を整形する。"""
+    if str(style).strip().lower() == "list":
+        return format_weather_block(results)
+    return format_weather_table(results)
 
 
 # ===========================================================
@@ -1540,7 +1649,7 @@ def send_webex_message(room_id: str, message_text: str, bot_token: str) -> bool:
     Webexスペースにメッセージを送信します。
     Sends a Markdown message to the specified Webex space.
     """
-    url = "https://webexapis.com/v1/messages"
+    url = get_endpoint("webex", "messages")
     headers = {
         "Authorization": f"Bearer {bot_token}",
         "Content-Type":  "application/json",
@@ -1630,6 +1739,7 @@ def process_channel(
     cat_label_override: str | None = None,
     digest_collector: dict[str, list[dict]] | None = None,
     cvrf_url_template: str = "",
+    max_items: int = MAX_ITEMS_DEFAULT,
 ) -> None:
     """
     1チャンネル分のフィルタリングと送信を処理します。
@@ -1649,7 +1759,7 @@ def process_channel(
     else:
         filtered = filter_by_category(all_entries, categories, category_keywords)
 
-    if len(filtered) > 15:
+    if len(filtered) > max_items:
         # スコア降順で集計（ログ用）
         from collections import Counter
         score_dist = Counter(e.get("_score", 0) for e in filtered)
@@ -1658,7 +1768,7 @@ def process_channel(
         reranked = None
         if anthropic_api_key:
             reranked = rerank_with_llm(
-                channel_name, cat_label, filtered, 15,
+                channel_name, cat_label, filtered, max_items,
                 anthropic_api_key, ANTHROPIC_RERANK_MODEL,
             )
         if reranked is not None:
@@ -1667,15 +1777,15 @@ def process_channel(
         else:
             if anthropic_api_key:
                 print("    LLM再ランク失敗 → stratified_pick にフォールバック")
-            # 高スコア優先で15件に絞る（同階層内のみランダム抽出）
-            filtered = stratified_pick(filtered, 15)
+            # 高スコア優先で上限まで絞る（同階層内のみランダム抽出）
+            filtered = stratified_pick(filtered, max_items)
         kept_dist = Counter(e.get("_score", 0) for e in filtered)
         kept_str = " / ".join(f"score={s}:{c}" for s, c in sorted(kept_dist.items(), reverse=True))
-        print(f"    15件超 → 絞り込み後: {len(filtered)} 件")
+        print(f"    {max_items}件超 → 絞り込み後: {len(filtered)} 件")
         print(f"      抽出前 ({sum(score_dist.values())}件): {dist_str}")
         print(f"      抽出後 ({sum(kept_dist.values())}件): {kept_str}")
     else:
-        print(f"    15件以下（再ランク不要）: {len(filtered)} 件")
+        print(f"    {max_items}件以下（再ランク不要）: {len(filtered)} 件")
 
     filtered.sort(key=lambda x: x["published"], reverse=True)
 
@@ -1738,6 +1848,13 @@ def process_channel(
 DIGEST_TOP_N = 5          # ダイジェストで各チャンネルに載せる見出しの上限
 DIGEST_MIN_JAPANESE = 5   # 「日本のニュース」枠の最低件数
 
+# ダイジェストに載せられる枠。channels.yml の digest_blocks で選ぶ。
+DIGEST_BLOCK_NAMES = ("weather", "channels", "jiji")
+# 既定で出す枠と順番。時事（jiji）は既定では出さない（必要なら digest_blocks に足す）。
+DEFAULT_DIGEST_BLOCKS = ["weather", "channels"]
+# 天気の見せ方。table = コードブロックの表 / list = 箇条書き。
+DEFAULT_WEATHER_STYLE = "table"
+
 
 def _digest_entry_line(e: dict) -> str:
     """ダイジェスト1行（見出し＋リンク＋日付）。要約は載せず簡潔に。"""
@@ -1797,31 +1914,96 @@ def build_digest_message(
     min_japanese: int = DIGEST_MIN_JAPANESE,
     category_keywords: dict[str, list[str]] | None = None,
     regions_cfg: dict | None = None,
+    blocks: list[str] | None = None,
+    weather_style: str = DEFAULT_WEATHER_STYLE,
 ) -> str:
     """
-    天気（今日・明日／4地点）＋各チャンネル投稿ダイジェスト＋時事ダイジェスト（地域バランス）を
-    1つの Markdown メッセージに組み立てる。
+    ダイジェストのメッセージを組み立てる。
 
-    regions_cfg と category_keywords が揃っている場合は地域バランス型の「時事ダイジェスト」枠を、
-    そうでなければ従来の「🇯🇵 日本のニュース（最低 min_japanese 件）」枠を出す（後方互換）。
+    blocks に載せる枠を「出す順」で指定する（既定は DEFAULT_DIGEST_BLOCKS）。
+      weather  … 今日・明日の天気（weather_style で表形式／箇条書きを切替）
+      channels … 各チャンネルが投稿した記事のまとめ
+      jiji     … 時事ダイジェスト（regions.yml の地域バランス。既定では出さない）
+
+    jiji は regions_cfg と category_keywords が揃っていれば地域バランス型、
+    無ければ従来の「🇯🇵 日本のニュース（最低 min_japanese 件）」枠になる（後方互換）。
     """
+    wanted = [b for b in (blocks if blocks is not None else DEFAULT_DIGEST_BLOCKS)
+              if b in DIGEST_BLOCK_NAMES]
     weekday = "月火水木金土日"[now_jst.weekday()]
     parts = [
         f"🌅 **デイリーブリーフィング**　{now_jst.strftime('%Y-%m-%d')} ({weekday})",
         "─" * 40,
     ]
-
-    # 天気ブロック（全滅時は省略）
-    weather_block = format_weather_block(weather_results)
-    if weather_block:
-        parts.append(weather_block)
-        parts.append("─" * 40)
-
-    # 既にダイジェストへ載せた link（日本のニュース枠の重複回避に使う）
+    # 既にダイジェストへ載せた link（時事枠の重複回避に使う）
     shown_links: set[str] = set()
 
-    # チャンネル別ダイジェスト
-    parts.append("🗞 **本日のニュースダイジェスト**")
+    for name in wanted:
+        if name == "weather":
+            block = format_weather(weather_results, weather_style)
+            if block:
+                parts.append(block)
+                parts.append("─" * 40)
+        elif name == "channels":
+            parts.append(_digest_channels_section(digest_collector, top_n, shown_links))
+        elif name == "jiji":
+            parts.append(_digest_jiji_section(
+                all_entries, category_keywords, regions_cfg, shown_links, min_japanese))
+
+    return "\n".join(p for p in parts if p)
+
+
+def max_items_of(channel: dict) -> int:
+    """チャンネル設定から1回に投稿する記事数の上限を返す。
+
+    未指定なら既定（MAX_ITEMS_DEFAULT）。1未満や上限超え、数値でない値は
+    既定に戻して知らせる（黙って想定外の件数で配信しないため）。
+    """
+    raw = channel.get("max_items")
+    if raw is None:
+        return MAX_ITEMS_DEFAULT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        print(f"  [WARN] {channel.get('name')}: max_items は数字で書いてください"
+              f"（'{raw}'）。既定の {MAX_ITEMS_DEFAULT} 件を使います")
+        return MAX_ITEMS_DEFAULT
+    if not 1 <= value <= MAX_ITEMS_LIMIT:
+        print(f"  [WARN] {channel.get('name')}: max_items は 1〜{MAX_ITEMS_LIMIT} の範囲で"
+              f"書いてください（{value}）。既定の {MAX_ITEMS_DEFAULT} 件を使います")
+        return MAX_ITEMS_DEFAULT
+    return value
+
+
+def digest_blocks_of(channel: dict) -> list[str]:
+    """チャンネル設定から、ダイジェストに載せる枠を「出す順」で返す。
+
+    digest_blocks を書いていなければ既定（天気＋チャンネルまとめ）。
+    知らない名前は無視し、その旨を知らせる（設定ミスに気付けるように）。
+    """
+    raw = channel.get("digest_blocks")
+    if raw is None:
+        return list(DEFAULT_DIGEST_BLOCKS)
+    if not isinstance(raw, list):
+        print(f"  [WARN] {channel.get('name')}: digest_blocks はリストで書いてください。既定を使います")
+        return list(DEFAULT_DIGEST_BLOCKS)
+    blocks, unknown = [], []
+    for item in raw:
+        name = str(item).strip().lower()
+        if name in DIGEST_BLOCK_NAMES:
+            blocks.append(name)
+        elif name:
+            unknown.append(name)
+    if unknown:
+        print(f"  [WARN] {channel.get('name')}: 知らない digest_blocks を無視しました: "
+              f"{'、'.join(unknown)}（使えるのは {'、'.join(DIGEST_BLOCK_NAMES)}）")
+    return blocks
+
+
+def _digest_channels_section(digest_collector: dict[str, list[dict]],
+                             top_n: int, shown_links: set[str]) -> str:
+    """各チャンネルが投稿した記事のまとめ。載せた link は shown_links に足す。"""
+    parts = ["🗞 **本日のニュースダイジェスト**"]
     any_channel = False
     for ch_name, entries in digest_collector.items():
         if not entries:
@@ -1838,22 +2020,22 @@ def build_digest_message(
         parts.append("\n".join(block))
     if not any_channel:
         parts.append("（本日は各チャンネルへの投稿がありませんでした）")
-
-    # 時事枠: regions.yml があれば地域バランス型（日本/米国/その他）、無ければ従来の日本ニュース枠。
-    if regions_cfg and category_keywords:
-        jiji = build_jiji_section(all_entries, category_keywords, regions_cfg, shown_links)
-        if jiji:
-            parts.append(jiji)
-    else:
-        # フォールバック: 🇯🇵 日本のニュース枠（最低 min_japanese 件・既掲載と重複しない新着順）
-        jp = pick_japanese(all_entries, shown_links, min_japanese)
-        if jp:
-            block = ["\n🇯🇵 **日本のニュース**"]
-            for e in jp:
-                block.append(_digest_entry_line(e))
-            parts.append("\n".join(block))
-
     return "\n".join(parts)
+
+
+def _digest_jiji_section(all_entries: list[dict],
+                         category_keywords: dict[str, list[str]] | None,
+                         regions_cfg: dict | None,
+                         shown_links: set[str], min_japanese: int) -> str:
+    """時事枠。regions.yml があれば地域バランス型、無ければ日本のニュース枠。"""
+    if regions_cfg and category_keywords:
+        return build_jiji_section(all_entries, category_keywords, regions_cfg, shown_links)
+    jp = pick_japanese(all_entries, shown_links, min_japanese)
+    if not jp:
+        return ""
+    block = ["\n🇯🇵 **日本のニュース**"]
+    block.extend(_digest_entry_line(e) for e in jp)
+    return "\n".join(block)
 
 
 def send_digest(
@@ -2310,6 +2492,7 @@ def main() -> None:
                 cat_label_override=cat_label_override,
                 digest_collector=digest_collector,
                 cvrf_url_template=cvrf_url_template,
+                max_items=max_items_of(ch),
             )
             time.sleep(1)  # チャンネル間のレート制限
 
@@ -2331,18 +2514,24 @@ def main() -> None:
                 weather_results = []
                 print("  [INFO] urls.yml に weather 設定が無いため天気ブロックを省略します")
 
-            if regions_cfg:
-                print(
-                    "  時事ダイジェスト: 地域バランス "
-                    f"日本{regions_cfg['quota']['japan']}/米{regions_cfg['quota']['us']}"
-                    f"/その他{regions_cfg['quota']['other']}（regions.yml）"
-                )
-            digest_message = build_digest_message(
-                weather_results, digest_collector, all_entries, now_jst,
-                category_keywords=category_keywords, regions_cfg=regions_cfg,
-            )
             for ch in digest_channels:
                 ch_name   = ch.get("name", "Unnamed")
+                blocks = digest_blocks_of(ch)
+                weather_style = str(ch.get("weather_format")
+                                    or DEFAULT_WEATHER_STYLE).strip().lower()
+                print(f"  {ch_name} の構成: {'、'.join(blocks) or '（なし）'}"
+                      f" / 天気は{'表' if weather_style != 'list' else '箇条書き'}形式")
+                if "jiji" in blocks and regions_cfg:
+                    print(
+                        "  時事ダイジェスト: 地域バランス "
+                        f"日本{regions_cfg['quota']['japan']}/米{regions_cfg['quota']['us']}"
+                        f"/その他{regions_cfg['quota']['other']}（regions.yml）"
+                    )
+                digest_message = build_digest_message(
+                    weather_results, digest_collector, all_entries, now_jst,
+                    category_keywords=category_keywords, regions_cfg=regions_cfg,
+                    blocks=blocks, weather_style=weather_style,
+                )
                 space_id  = ch.get("webex_space_id", "")
                 bot_token = ch.get("webex_bot_token", "") or WEBEX_BOT_TOKEN
                 if ch.get("_skip_reason") or not space_id:
