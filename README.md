@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v4.21.0` ／ **Release Date**: 2026-08-03
+**Version**: `v4.22.0` ／ **Release Date**: 2026-08-03
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約・再ランクスクリプト / RSS-to-Webex News Notifier with LLM Summary & Re-ranking**
 
@@ -1054,12 +1054,21 @@ All URLs — RSS feeds and external APIs alike — live here, never hard-coded i
     locations:
       - { label: 東京, lat: 35.6895, lon: 139.6917 }
 
-# 4. Cisco Security Advisory の CVSS 取得API（{adv_id} が Advisory ID に置き換わる）
-- cisco_advisory:
-    cvrf_url: https://sec.cloudapps.cisco.com/security/center/contentxml/CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
 ```
 
-形式 2〜4 は RSS ではないため、**記事の収集対象からは自動的に除外されます**。3 と 4 は任意で、書かなければその機能（天気ブロック／CVSS バッジ）を省いて動きます。
+形式 2・3 は RSS ではないため、**記事の収集対象からは自動的に除外されます**。天気は任意で、書かなければダイジェストの天気ブロックを省いて動きます。
+
+**Cisco Security Advisory の CVSS バッジ**は、グループに `cvrf_url` を添えると付きます。「どこから集めるか」と「どう色を付けるか」を同じ場所に置くための書き方です。
+
+```yaml
+- group: Cisco-Security-Advisories
+  urls:
+    - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
+  # {adv_id} が Advisory ID に置き換わる。書かなければバッジを付けずに配信する
+  cvrf_url: https://sec.cloudapps.cisco.com/security/center/contentxml/CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
+```
+
+> v4.21 以前の書き方（独立した `- cisco_advisory:` エントリ）もそのまま読めます。両方ある場合はグループ側が使われます。
 
 > グループは、特定フィード由来の記事を専用チャンネルへ振り分けるための仕組みです。詳細は[ソースベース振り分けと Cisco Security Advisories](#ソースベース振り分けと-cisco-security-advisories--source-based-routing--cvss)を参照。
 
@@ -1703,7 +1712,9 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 | Version | 日付 | 何をしたか |
 |:---|:---|:---|
-| **v4.21.0** | 2026-08-03 | **いまどの OS で動いているかを自動実行タブに明示**するようにした（使う仕組み・登録先・呼ばれるファイル・その OS 固有の注意まで）。あわせて OS 判定を1か所（`current_os()`）に集約。**これまでは「Windows かどうか」だけで分岐しており、Linux などが macOS 扱い**になって `~/Library/LaunchAgents` に plist を書き `launchctl` を呼ぼうとしていた。未対応 OS では登録操作を出さず、cron の例を案内する。Windows のタスク登録コマンドで `/TR` に二重の引用符が付く問題も修正。 |
+| **v4.22.0** | 2026-08-04 | **Cisco Security Advisory の設定を1か所にまとめた**。「どこから集めるか」（グループの `urls`）と「その記事に CVSS をどう付けるか」（`cvrf_url`）が `urls.yml` の離れた2エントリに分かれていたため、グループに `cvrf_url` を直接書けるようにした。旧形式（独立した `cisco_advisory:` エントリ）もそのまま読めます。 |
+| v4.21.1 | 2026-08-04 | 旧構成の `bots.yml` を削除（v4.0.0 で `channels.yml` に置き換わって以降、コードからは読まれていませんでした）。`.env.example` などに残っていた `bots.yml` という説明を `channels.yml` に直し、実際は `channels.yml` を読んでいた関数 `load_bots()` を `load_channels()` へ改名。v1.x からの移行手順（README 内）は、移行元の説明としてそのまま残しています。 |
+| v4.21.0 | 2026-08-03 | **いまどの OS で動いているかを自動実行タブに明示**するようにした（使う仕組み・登録先・呼ばれるファイル・その OS 固有の注意まで）。あわせて OS 判定を1か所（`current_os()`）に集約。**これまでは「Windows かどうか」だけで分岐しており、Linux などが macOS 扱い**になって `~/Library/LaunchAgents` に plist を書き `launchctl` を呼ぼうとしていた。未対応 OS では登録操作を出さず、cron の例を案内する。Windows のタスク登録コマンドで `/TR` に二重の引用符が付く問題も修正。 |
 | v4.20.0 | 2026-08-03 | **配信件数をスペースごとに変えられる**ようにした（`max_items`。未指定なら従来どおり15件、1〜50の範囲）。超えた分を AI が絞り込む点は変わりません。**ダイジェストの枠の選択を「ダイジェスト」タブへ移した**（v4.19.0 ではセットアップタブのチャンネル設定の中にあり、ダイジェストの中身を決める設定がダイジェストタブから見つからなかった）。**置き場所が TCC 保護下のときは、自動実行タブで登録できないことを理由つきで表示**するようにした（これまでは登録でき、定時実行だけが静かに失敗していた）。 |
 | v4.19.1 | 2026-08-03 | 「設定の全体像」タブに**投稿先スペースの実際の名前**を出せるようにした。これまで表示されるのは変数名（`${WEBEX_SPACE_ID_...}`）だけで、どのチャンネルがどのスペースへ届くのか画面から確かめられなかった。ボタンを押すと列が増え、チャンネル名と食い違っているものを下に列挙する。**チャンネル名は投稿の見出しで、スペース名とは別物**という説明も添えた（`categories:` を省略しているチャンネルは名前がカテゴリ名として使われるため、改名すると配信が止まる）。 |
 | v4.19.0 | 2026-08-03 | **ダイジェストの中身を選べる**ようにした。天気／各チャンネルのまとめ／時事ダイジェストをオンオフでき、順番も指定できる（`digest_blocks`）。**天気に湿度を追加**し（現在の湿度と、今日・明日の平均湿度）、**表形式**で地点を縦に並べる見せ方を新設して既定にした（`weather_format: table`。従来の箇条書きは `list`）。Webex は Markdown の表に対応していないため、等幅のコードブロックで全角文字と絵文字の表示幅を数えて桁を揃えている。**時事ダイジェストの既定はオフ**に変更したので、これまでどおり出したい場合は `digest_blocks` に `jiji` を足すか、セットアップタブでチェックを入れてください。 |

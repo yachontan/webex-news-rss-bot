@@ -191,7 +191,7 @@ with col_a:
     suffix = st.selectbox(
         "用途（変数名の末尾）/ Variable suffix",
         SUFFIX_CHOICES + ["（自由入力 / custom）"],
-        help="`bots.yml` の `${WEBEX_SPACE_ID_...}` と揃えてください。",
+        help="`channels.yml` の `${WEBEX_SPACE_ID_...}` と揃えてください。",
     )
 with col_b:
     if suffix == "（自由入力 / custom）":

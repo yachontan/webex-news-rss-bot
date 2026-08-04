@@ -179,27 +179,42 @@ def load_url_groups(path: str = URLS_FILE) -> dict[str, list[str]]:
 
 def load_advisory_config(path: str = URLS_FILE) -> str:
     """
-    urls.yml 内の cisco_advisory エントリから CVRF API の URL 雛形を読み込みます。
-    Loads the CVRF URL template from the `cisco_advisory` entry in urls.yml.
+    urls.yml から CVRF API の URL 雛形を読み込みます。
+    Loads the CVRF URL template from urls.yml.
 
-    形式 / Format:
-        - cisco_advisory:
-            cvrf_url: https://.../CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
+    形式 / Format（推奨）: Advisory を集めるグループに直接書く。
+        - group: Cisco-Security-Advisories
+          urls:
+            - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
+          cvrf_url: https://.../CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
+
+    「どこから集めるか」と「その記事に CVSS をどう付けるか」は同じ Advisory の話なので、
+    1つのエントリにまとめる。旧形式（独立した `- cisco_advisory:` エントリ）も読む。
 
     `{adv_id}` が Advisory ID に置き換わる。URL の正本は urls.yml に集約し、
     Python コードには直書きしない。未定義の場合は空文字を返す
     （その場合 CVSS バッジの付与をスキップする）。
-    cisco_advisory エントリは urls / group キーを持たないため RSS 収集からは無視される。
     """
+    def _valid(template: str, where: str) -> str:
+        template = (template or "").strip()
+        if template and "{adv_id}" not in template:
+            print(f"  [WARN] urls.yml {where}: cvrf_url に {{adv_id}} が含まれていません")
+            return ""
+        return template
+
+    fallback = ""
     for item in _read_feeds(path):
-        if not (isinstance(item, dict) and item.get("cisco_advisory")):
+        if not isinstance(item, dict):
             continue
-        template = str((item["cisco_advisory"] or {}).get("cvrf_url") or "").strip()
-        if template and "{adv_id}" in template:
-            return template
-        if template:
-            print("  [WARN] urls.yml cisco_advisory: cvrf_url に {adv_id} が含まれていません")
-    return ""
+        if item.get("group"):
+            found = _valid(item.get("cvrf_url"), f"group: {item['group']}")
+            if found:
+                return found
+        elif item.get("cisco_advisory"):
+            # 旧形式。グループ側に書かれていればそちらを優先する
+            fallback = fallback or _valid(
+                (item["cisco_advisory"] or {}).get("cvrf_url"), "cisco_advisory")
+    return fallback
 
 
 def load_weather_config(path: str = URLS_FILE) -> dict | None:
@@ -1016,7 +1031,7 @@ def resolve_categories_from_name(name: str, category_keywords: dict[str, list[st
     return [n] if n and n in category_keywords else []
 
 
-def load_bots(path: str = CHANNELS_FILE) -> list[dict]:
+def load_channels(path: str = CHANNELS_FILE) -> list[dict]:
     """
     channels.yml の channels: セクションからマルチチャンネル設定を読み込みます。
     ファイルが無い、または channels: が無い場合は空リスト＝シングルボットモード。
@@ -2073,7 +2088,7 @@ def send_digest(
 
 def main() -> None:
     category_keywords = load_categories()
-    channels = load_bots()
+    channels = load_channels()
     multi_mode = len(channels) > 0
 
     parser = argparse.ArgumentParser(
@@ -2123,7 +2138,7 @@ def main() -> None:
     if args.categories_file != CATEGORIES_FILE:
         category_keywords = load_categories(args.categories_file)
     if args.channels_file != CHANNELS_FILE:
-        channels = load_bots(args.channels_file)
+        channels = load_channels(args.channels_file)
         multi_mode = len(channels) > 0
 
     # categories を省略したチャンネルは、name を categories.yml のカテゴリ名として解決する。
