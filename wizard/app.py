@@ -733,11 +733,30 @@ def _render_overview_feeds(existing: core.ExistingConfig) -> None:
                    f"その他 {len(regions['keywords']['other'])} 語")
 
 
+def _render_schedule_help(hour: int, minute: int, weekdays: list[int]) -> None:
+    """自動実行がうまく動かないときの手当てをまとめて出す。"""
+    with st.expander("うまく動かないときは"):
+        st.markdown(
+            "- **時刻になっても動かない**: パソコンがスリープしていると実行されません。"
+            "macOS なら次のコマンド（ターミナルで実行・パスワードを聞かれます）で"
+            "自動起床を設定できます。\n"
+            f"  ```\n  {core.wake_command(hour, minute, weekdays)}\n  ```\n"
+            "- **手動では動くのに定時だけ失敗する**: 置き場所が原因のことがあります"
+            "（→ [リポジトリの置き場所](#リポジトリの置き場所--where-to-put-this-repository)）。\n"
+            "- **日本時間とずれて届く**: 予約はこのパソコンの時計で行われますが、"
+            "実行するかどうかは日本時間で判定しています。ずれて届く場合は、いったん"
+            "「解除」してから登録し直してください。\n"
+            f"- **ログの場所**: `{core.REPO_ROOT / 'log'}` に、実行ごとの記録が残ります。"
+            "日本時間ではないと判定して見送った回は `gate.log` に理由が残ります。")
+
+
 def render_scheduler() -> None:
     """自動実行タブ: 毎朝決まった時刻に動かす設定。"""
     st.header("自動実行の設定")
     st.caption("毎朝きまった時刻に、このツールを自動で動かします。"
                "**パソコンの電源が入っていて、スリープしていない**ことが前提です。")
+    st.caption("時刻はすべて**日本時間（JST）**です。配信の見出しに入る日付も、記事に付く"
+               "時刻も、月曜だけ週末分をまとめる判定も、本体が日本時間で処理するためです。")
 
     import platform
     system = platform.system()
@@ -755,14 +774,19 @@ def render_scheduler() -> None:
         st.write("**いつ動かすか**")
         col_time, col_days = st.columns([1, 3])
         with col_time:
-            when = st.time_input("時刻", value=core.dt_time(9, 1), key="sched_time",
-                                 help="ニュースを集めて配信する時刻です。")
+            when = st.time_input("時刻（日本時間）", value=core.dt_time(9, 1), key="sched_time",
+                                 help="ニュースを集めて配信する時刻です。日本時間で指定します。")
         with col_days:
             picked = st.multiselect("曜日", core.WEEKDAY_LABELS,
                                     default=core.WEEKDAY_LABELS[:5], key="sched_days",
                                     help="既定は平日（月〜金）です。")
         weekdays = [core.WEEKDAY_LABELS.index(d) for d in picked]
         st.caption(core.describe_schedule(when.hour, when.minute, weekdays))
+        local = core.describe_local_schedule(when.hour, when.minute, weekdays)
+        if local:
+            st.warning("**このパソコンの時計は日本時間とずれています。**\n\n" + local
+                       + "\n\n配信そのものは日本時間どおりに行われます。",
+                       icon=":material/public:")
 
     col_a, col_b, col_c = st.columns(3)
     with col_a:
@@ -781,13 +805,8 @@ def render_scheduler() -> None:
             st.success("実行を開始しました。結果は log フォルダに出ます。") \
                 if ok else st.error(message or "実行できませんでした")
 
-    with st.expander("うまく動かないときは"):
-        st.markdown(
-            "- **時刻になっても動かない**: パソコンがスリープしていると実行されません。"
-            "macOS なら `sudo pmset repeat wakeorpoweron MTWRF 08:55:00` で自動起床を設定できます。\n"
-            "- **手動では動くのに定時だけ失敗する**: 置き場所が原因のことがあります"
-            "（→ [リポジトリの置き場所](#リポジトリの置き場所--where-to-put-this-repository)）。\n"
-            f"- **ログの場所**: `{core.REPO_ROOT / 'log'}` に、実行ごとの記録が残ります。")
+    _render_schedule_help(when.hour, when.minute, weekdays)
+
 
 
 def render_space_inspector() -> None:

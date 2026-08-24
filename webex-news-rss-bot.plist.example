@@ -27,6 +27,16 @@
       （ターミナルからの手動実行は成功するので、定時実行だけ動かない形で表面化する）
     - 実行ログはラッパー側で log/launchd_run-YYYYMMDD-HHMMSS.log に出力される。
       ここで指定する StandardOutPath/StandardErrorPath は launchd 自身のエラー用。
+
+  時刻の扱い / About the time:
+    launchd は「この Mac のローカル時刻」でしか予約できない。一方 rss-bot の配信内容
+    （見出しの日付、記事の JST 表記、月曜だけ週末分をまとめる判定）はすべて日本時間が
+    基準なので、Mac のタイムゾーンが日本以外だと内容と配信時刻がずれる。
+    このテンプレートは「Mac が日本時間」を前提に平日 9:01 で書いてある。
+    日本以外のタイムゾーンで使うなら、手で書くよりウィザードの「自動実行」タブ
+    （または python -m wizard.cli）を使うこと。日本時間の 9:01 に当たるローカル時刻を
+    計算し、夏時間で2通りになる場合は両方を予約したうえで、run_rssbot.sh に渡す引数
+    （下の <string>9</string> と <string>12345</string>）で正しい回だけを実行させる。
   ============================================================
 -->
 <plist version="1.0">
@@ -38,12 +48,17 @@
     <array>
         <string>/bin/bash</string>
         <string>__REPO_DIR__/run_rssbot.sh</string>
+        <!-- 日本時間のゲート条件: 配信する「時」/ 配信する曜日（1=月 … 7=日）。
+             ローカル時刻での予約が日本時間の何時に当たるかを実行時に確かめ、
+             ずれた回は配信せずに log/gate.log へ理由だけ残す。 -->
+        <string>9</string>
+        <string>12345</string>
     </array>
 
-    <!-- 平日（月〜金）9:01 に実行 / Weekdays at 09:01.
+    <!-- 平日（月〜金）9:01 に実行（この Mac のローカル時刻）/ Weekdays at 09:01 local time.
          毎日実行したい場合は、この array を
          <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
-         の1要素に置き換え、run_rssbot.sh の --weekend-catchup を外す。 -->
+         の1要素に置き換え、run_rssbot.sh の [weekend-catchup] オプションを外す。 -->
     <key>StartCalendarInterval</key>
     <array>
         <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>

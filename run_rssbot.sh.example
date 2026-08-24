@@ -22,6 +22,44 @@ ERR_FILE="$LOG_DIR/launchd_err-${TIMESTAMP}.log"
 mkdir -p "$LOG_DIR"
 cd "$TARGET_DIR"
 
+# --- 日本時間ゲート / Japan-time gate ---
+# 配信内容（見出しの日付、記事の JST 表記、月曜だけ週末分をまとめる判定）はすべて
+# 日本時間が基準。ところが launchd は「端末のローカル時刻」でしか予約できないため、
+# 時差のある土地では JST の同じ時刻に当たるローカル時刻が夏時間で年に2通りになる。
+# ウィザードは両方を予約するので、本当に配信すべき回かどうかをここで判定する。
+#   第1引数: 配信する時刻（日本時間の「時」。既定 9）
+#   第2引数: 配信する曜日（日本時間で 1=月 … 7=日 を並べた文字列。既定 12345）
+TARGET_HOUR="${1:-9}"
+TARGET_DAYS="${2:-12345}"
+STAMP="$LOG_DIR/.last_run_jst"      # その日はもう配信したという印
+FORCE_FLAG="$LOG_DIR/.force_run"    # 「いますぐ1回実行」が置く、1回だけの通行証
+GATE_LOG="$LOG_DIR/gate.log"
+
+JST_DATE=$(TZ=Asia/Tokyo date +%Y-%m-%d)
+JST_DAY=$(TZ=Asia/Tokyo date +%u)
+JST_HOUR=$(TZ=Asia/Tokyo date +%H)
+
+gate_skip() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') skip: $1（日本時間 ${JST_DATE} ${JST_HOUR}時）" >> "$GATE_LOG"
+    exit 0
+}
+
+if [ -f "$FORCE_FLAG" ]; then
+    rm -f "$FORCE_FLAG"
+else
+    case "$TARGET_DAYS" in
+        *"$JST_DAY"*) ;;
+        *) gate_skip "日本時間では配信しない曜日" ;;
+    esac
+    if [ "$((10#$JST_HOUR))" -lt "$((10#$TARGET_HOUR))" ]; then
+        gate_skip "日本時間ではまだ配信時刻の前"
+    fi
+    if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$JST_DATE" ]; then
+        gate_skip "この日はすでに配信済み"
+    fi
+fi
+echo "$JST_DATE" > "$STAMP"
+
 # --- ネットワーク/DNS 準備待ち / Wait for network readiness ---
 # スリープ復帰直後などにネットワーク/DNS が未準備のまま launchd が発火すると、
 # 大量のフィード取得が DNS 解決失敗し、収集が異常遅延・ハングする。

@@ -1,11 +1,11 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v4.14.0-blue)
+![Version](https://img.shields.io/badge/version-v4.15.0-blue)
 ![Release Date](https://img.shields.io/badge/release-2026--08--01-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v4.14.0` ／ **Release Date**: 2026-08-01
+**Version**: `v4.15.0` ／ **Release Date**: 2026-08-23
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約・再ランクスクリプト / RSS-to-Webex News Notifier with LLM Summary & Re-ranking**
 
@@ -1194,6 +1194,28 @@ Re-ranking costs a single API call (max_tokens=200) per over-limit channel — a
 定期的にスクリプトを自動実行し、Webexに最新ニュースを流すには、OSに合わせてスケジュール実行を設定します。
 **macOS環境の場合、Macがスリープ（画面ロック）していると `cron` は指定時刻に動作しないことがあるため、`launchd` (plist) の利用を強く推奨します。**
 
+### 配信時刻は「日本時間」で考えます / Times are Japan time (JST)
+
+このツールが作る投稿は、見出しに入る日付も、記事に付く時刻表示も、月曜だけ週末分（金土日）をまとめる判定も、**すべて日本時間（JST）で処理しています**。
+そのため配信時刻も日本時間で指定するのが自然です。
+
+ところが OS のスケジューラ（macOS の launchd / Windows のタスク スケジューラ）は、**そのパソコンのローカル時刻でしか予約できません**。
+パソコンのタイムゾーンが日本以外だと、たとえば「平日 09:01」と登録しても日本時間では別の時刻に配信されてしまいます。
+
+**ウィザードの「自動実行」タブ（または `python -m wizard.cli`）を使えば、この変換は自動で行われます。**
+
+| パソコンのタイムゾーン | 何が起きるか |
+|:---|:---|
+| 日本（Asia/Tokyo） | 入力した時刻がそのまま登録されます。特別なことは起きません。 |
+| 日本以外 | 日本時間の指定時刻に当たるローカル時刻を計算して登録します。夏時間のある地域では候補が2通りになるため**両方を予約**し、実行時に `run_rssbot.sh` / `run_rssbot.bat` が日本時間を見て**正しい回だけを実行**します。 |
+
+見送った回は配信せず、`log/gate.log` に理由（「日本時間ではまだ配信時刻の前」など）だけが残ります。
+同じ日に二重配信しないよう、その日配信済みかどうかは `log/.last_run_jst` で記録しています。
+
+> **手書きで plist を作る場合の注意**
+> `run_rssbot.sh` の第1引数に「配信する時（日本時間）」、第2引数に「配信する曜日（日本時間で 1=月 … 7=日）」を渡してください。省略時は `9` と `12345`（平日 9 時）として扱います。
+> パソコンが日本時間なら、この引数を意識する必要はありません。
+
 ### macOS の場合: launchd (推奨)
 
 > **✅ 推奨構成（v1.1.0〜）: TCC 保護外のパスにリポジトリを置いて直接実行**（→ [リポジトリの置き場所](#リポジトリの置き場所--where-to-put-this-repository)）  
@@ -1261,6 +1283,10 @@ Register an auto-wake schedule with `pmset` so the Mac is awake before launchd f
 # Wake the Mac at 08:55 on weekdays (job fires at 09:01)
 sudo pmset repeat wakeorpoweron MTWRF 08:55:00
 ```
+
+> **`pmset` の時刻もローカル時刻です。** Mac のタイムゾーンが日本以外の場合、上の例そのままでは起床時刻がずれます。
+> ウィザードの「自動実行」タブを開くと、その Mac 用の `pmset` コマンドが計算されて表示されるので、それをコピーしてターミナルで実行してください。
+> （例: 米国西海岸で日本時間 09:01 に配信する場合は `sudo pmset repeat wakeorpoweron MTWRU 15:55:00`）
 
 設定確認・解除コマンド / Verify and cancel commands:
 
@@ -1386,10 +1412,12 @@ The simplest way: double-click **`自動実行を登録.bat`** (no admin rights 
 
 | メニュー | 内容 |
 |:---:|:---|
-| 1 | 平日 09:01 に実行するタスクを登録（タスク名 `rss-bot daily`） |
+| 1 | **日本時間の**平日 09:01 に実行するタスクを登録（タスク名 `rss-bot daily`） |
 | 2 | 登録したタスクを解除 |
 | 3 | 現在の状態を表示 |
 | 4 | 今すぐ1回実行して動作確認 |
+
+PC のタイムゾーンが日本なら、そのまま平日 09:01 のタスクが1つ登録されます。日本以外の場合は、日本時間 09:01 に当たるローカル時刻を計算して登録します（夏時間で候補が2通りになる地域では `rss-bot daily 2` も作られ、`run_rssbot.bat` が正しい回だけを実行します）。
 
 登録されるタスクは `run_rssbot.bat` を呼びます。これは macOS の `run_rssbot.sh` に相当するラッパーで、**実行ごとにタイムスタンプ付きログを `log\` に出力**し、スリープ復帰直後などに備えて**投稿先へ疎通できるまで最大5分待って**から本体を起動します。パス編集は不要です。
 
@@ -1398,6 +1426,8 @@ The simplest way: double-click **`自動実行を登録.bat`** (no admin rights 
 
 PowerShell から以下のコマンドで、毎日 09:01 に実行するタスクを登録できます。  
 Run the following PowerShell command to register a daily task at 09:01:
+
+> この手動登録は **PC のローカル時刻**での予約です。PC が日本時間でない場合は、`自動実行を登録.bat` かウィザードを使ってください（日本時間への換算が入ります）。
 
 ```powershell
 $action  = New-ScheduledTaskAction `
@@ -1574,6 +1604,7 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 | Version | 日付 | 何をしたか |
 |:---|:---|:---|
+| **v4.15.0** | 2026-08-23 | 定時実行の時刻指定を**日本時間（JST）基準**に変更した。パソコンのタイムゾーンが日本以外でも、日本時間の指定時刻どおりに配信される（夏時間の切り替わりも自動で吸収）。あわせて `webex-news-rss-bot.plist.example` がXML として壊れていた不具合（コメント内の `--`）を修正。 |
 | **v4.14.0** | 2026-08-02 | 記事を仕分ける `categories.yml` も雛形方式にした。Git には `categories.yml.example` だけを置き、実ファイルは各自の環境で育てる形に変更（ウィザードが自動で作ります）。 |
 | **v4.13.0** | 2026-08-02 | **毎朝の自動実行を画面から設定**できるようにした（時刻・曜日を選ぶだけ。macOS は launchd、Windows はタスク スケジューラへ登録／解除／即時実行）。ブラウザUI・ターミナルの両方に対応。あわせて、**保存前に「何を上書き・追加するか」を一覧で示し、承諾しないと保存できない**ようにした。要約AI を切り替えるときは、他社のキーが設定済みである旨を警告する。 |
 | **v4.12.0** | 2026-08-02 | 設定ファイルが1つも無い状態でも、**bot を用意した時点でひな形から自動生成**するようにした（`.env` / `urls.yml` / `channels.yml` / `regions.yml` / `morning_messages.txt`）。既にあるファイルには触れない。ブラウザUI・ターミナル、macOS・Windows のいずれでも同じように動く。 |

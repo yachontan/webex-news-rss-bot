@@ -231,13 +231,15 @@ def step_dry_run() -> None:
 def step_schedule() -> None:
     """ステップ7: 毎朝の自動実行を登録する（UI 版と同じ仕組みを使う）。"""
     print(f"\n{RULE}\nステップ 7 / 毎朝の自動実行を設定します\n{RULE}")
+    print("  時刻はすべて日本時間（JST）で指定します。")
+    print("  （見出しの日付も記事の時刻も、本体が日本時間で処理しているため）")
     registered, detail = core.schedule_status()
     print(f"  現在: {detail}")
     if not _ask_yes("自動実行を設定しますか？", default=not registered):
         print("  設定しませんでした。あとから「自動実行」タブでも設定できます。")
         return
 
-    text = _ask("  何時に実行しますか（HH:MM）", default="09:01")
+    text = _ask("  何時に実行しますか（日本時間 HH:MM）", default="09:01")
     try:
         hour, minute = (int(x) for x in text.split(":", 1))
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
@@ -257,6 +259,11 @@ def step_schedule() -> None:
         weekdays = [0, 1, 2, 3, 4]
 
     print(f"  {core.describe_schedule(hour, minute, weekdays)}")
+    local = core.describe_local_schedule(hour, minute, weekdays)
+    if local:
+        print("  ⚠️  このパソコンの時計は日本時間とずれています。")
+        print(f"      {local}")
+        print("      配信そのものは日本時間どおりに行われます。")
     if not _ask_yes("  この内容で登録しますか？"):
         print("  中止しました。")
         return
@@ -264,6 +271,10 @@ def step_schedule() -> None:
     print(f"  {'✅ 登録しました' if ok else '❌ 登録できませんでした'}: {message}")
     if ok:
         print("  ※ パソコンがスリープしていると実行されません。詳しくは README の「自動実行」を参照。")
+        wake = core.wake_command(hour, minute, weekdays)
+        if wake:
+            print("  ※ スリープからの自動起床を設定するなら、ターミナルで次を実行:")
+            print(f"      {wake}")
 
 
 def main() -> int:

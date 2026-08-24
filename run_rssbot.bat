@@ -19,6 +19,60 @@ cd /d "%~dp0"
 
 if not exist "log" mkdir "log"
 
+rem --- 日本時間ゲート / Japan-time gate ---
+rem  配信内容（見出しの日付、記事の JST 表記、月曜だけ週末分をまとめる判定）はすべて
+rem  日本時間が基準。ところがタスクスケジューラは「端末のローカル時刻」でしか予約できず、
+rem  時差のある土地では JST の同じ時刻に当たるローカル時刻が夏時間で年に2通りになる。
+rem  「自動実行を登録.bat」は両方を予約するので、本当に配信すべき回かをここで判定する。
+rem    第1引数: 配信する時刻（日本時間の「時」。既定 9）
+rem    第2引数: 配信する曜日（日本時間で 1=月 … 7=日 を並べた文字列。既定 12345）
+set "TARGET_HOUR=%~1"
+if not defined TARGET_HOUR set "TARGET_HOUR=9"
+set "TARGET_DAYS=%~2"
+if not defined TARGET_DAYS set "TARGET_DAYS=12345"
+set "STAMP=log\.last_run_jst"
+set "FORCE_FLAG=log\.force_run"
+set "GATE_LOG=log\gate.log"
+
+rem 日本時間の「日付・曜日(1=月…7=日)・時」をまとめて取得する
+for /f "usebackq tokens=1-3" %%a in (`powershell -NoProfile -Command "$t=[TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,[TimeZoneInfo]::FindSystemTimeZoneById('Tokyo Standard Time')); $d=@{Monday='1';Tuesday='2';Wednesday='3';Thursday='4';Friday='5';Saturday='6';Sunday='7'}[$t.DayOfWeek.ToString()]; '{0} {1} {2}' -f $t.ToString('yyyy-MM-dd'),$d,$t.Hour.ToString('00')"`) do (
+    set "JST_DATE=%%a"
+    set "JST_DAY=%%b"
+    set "JST_HOUR=%%c"
+)
+if not defined JST_DATE (
+    echo [run_rssbot] WARN: 日本時間を取得できませんでした。ゲートを通過します。>> "%GATE_LOG%"
+    goto :gatepass
+)
+
+if exist "%FORCE_FLAG%" goto :gatepass
+echo %TARGET_DAYS%| findstr /c:"%JST_DAY%" >nul
+if errorlevel 1 (
+    set "GATE_REASON=日本時間では配信しない曜日"
+    goto :gateskip
+)
+set /a JST_H=1%JST_HOUR% - 100
+if %JST_H% LSS %TARGET_HOUR% (
+    set "GATE_REASON=日本時間ではまだ配信時刻の前"
+    goto :gateskip
+)
+if not exist "%STAMP%" goto :gatepass
+set "LAST="
+set /p LAST=<"%STAMP%"
+if "%LAST%"=="%JST_DATE%" (
+    set "GATE_REASON=この日はすでに配信済み"
+    goto :gateskip
+)
+goto :gatepass
+
+:gateskip
+echo %DATE% %TIME% skip: %GATE_REASON%（日本時間 %JST_DATE% %JST_HOUR%時）>> "%GATE_LOG%"
+exit /b 0
+
+:gatepass
+if exist "%FORCE_FLAG%" del "%FORCE_FLAG%" >nul 2>&1
+echo %JST_DATE%> "%STAMP%"
+
 rem --- タイムスタンプ（ロケールに依存しない形で取得）/ Locale-independent timestamp ---
 set "TS="
 for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"`) do set "TS=%%i"

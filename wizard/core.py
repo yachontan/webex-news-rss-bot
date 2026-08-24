@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 
@@ -1389,6 +1389,40 @@ SCHEDULE_TASK_NAME = "rss-bot daily"          # Windows のタスク名
 WEEKDAY_LABELS = ["月", "火", "水", "木", "金", "土", "日"]
 _MAC_WEEKDAY = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 0}   # 月=1 … 日=0
 _WIN_WEEKDAY = {0: "MON", 1: "TUE", 2: "WED", 3: "THU", 4: "FRI", 5: "SAT", 6: "SUN"}
+_PMSET_WEEKDAY = {0: "M", 1: "T", 2: "W", 3: "R", 4: "F", 5: "S", 6: "U"}
+
+# 配信時刻は**つねに日本時間**で指定する。投稿の見出しの日付、記事に付く「JST」表記、
+# 月曜だけ週末分をまとめる判定は、すべて本体側が JST で処理している。端末のタイムゾーンで
+# 予約すると、時差のある土地では内容と配信時刻がずれる（例: 米西海岸の 09:01 = JST 翌 01:01）。
+JST = timezone(timedelta(hours=9))
+FORCE_FLAG = REPO_ROOT / "log" / ".force_run"
+
+
+def local_fire_times(hour: int, minute: int, weekdays: list[int],
+                     days: int = 366) -> list[tuple[int, int, int]]:
+    """JST の指定時刻を端末のローカル時刻に直した (曜日, 時, 分) の一覧を返す。
+
+    launchd もタスクスケジューラも「端末のローカル時刻」でしか予約できない。夏時間の
+    ある土地では、同じ JST 時刻に当たるローカル時刻が年に2通りになるため、1年分を
+    走査して実際に現れる組み合わせをすべて拾い、その全部を予約する。
+    どちらが本当の配信回かは、実行時に run_rssbot 側の日本時間ゲートが判定する。
+    """
+    if not weekdays:
+        return []
+    base = datetime.now(JST).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    found: dict[tuple[int, int, int], None] = {}
+    for offset in range(days):
+        moment = base + timedelta(days=offset)
+        if moment.weekday() in weekdays:
+            local = moment.astimezone()      # その瞬間の夏時間まで含めて変換される
+            found[(local.weekday(), local.hour, local.minute)] = None
+    return sorted(found)
+
+
+def local_matches_jst() -> bool:
+    """端末のタイムゾーンが、いま日本時間と同じかどうか。"""
+    now = datetime.now(JST)
+    return now.astimezone().utcoffset() == now.utcoffset()
 
 
 def _plist_path() -> Path:
@@ -1399,6 +1433,11 @@ def _plist_path() -> Path:
 def runner_path() -> Path:
     """定時実行から呼ぶラッパーのパス（OS ごとに違う）。"""
     return REPO_ROOT / ("run_rssbot.bat" if platform.system() == "Windows" else "run_rssbot.sh")
+
+
+def _runner_args(hour: int, weekdays: list[int]) -> list[str]:
+    """ラッパーに渡す日本時間ゲートの条件（配信する時・配信する曜日）。"""
+    return [str(hour), "".join(str(d + 1) for d in sorted(weekdays))]
 
 
 def ensure_runner() -> tuple[bool, str]:
@@ -1420,12 +1459,15 @@ def ensure_runner() -> tuple[bool, str]:
 
 
 def build_plist(hour: int, minute: int, weekdays: list[int]) -> str:
-    """launchd 用の plist を組み立てる。"""
+    """launchd 用の plist を組み立てる（時刻は JST 指定、予約はローカル時刻）。"""
     entries = "\n".join(
         f"        <dict><key>Weekday</key><integer>{_MAC_WEEKDAY[d]}</integer>"
-        f"<key>Hour</key><integer>{hour}</integer>"
-        f"<key>Minute</key><integer>{minute}</integer></dict>"
-        for d in sorted(weekdays))
+        f"<key>Hour</key><integer>{h}</integer>"
+        f"<key>Minute</key><integer>{m}</integer></dict>"
+        for d, h, m in local_fire_times(hour, minute, weekdays))
+    arguments = "\n".join(
+        f"        <string>{value}</string>"
+        for value in ["/bin/bash", str(runner_path()), *_runner_args(hour, weekdays)])
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1433,11 +1475,12 @@ def build_plist(hour: int, minute: int, weekdays: list[int]) -> str:
 <dict>
     <key>Label</key>
     <string>{SCHEDULE_LABEL}</string>
+    <!-- 引数は日本時間のゲート条件（配信する時 / 配信する曜日 1=月…7=日） -->
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>{runner_path()}</string>
+{arguments}
     </array>
+    <!-- 予約はローカル時刻。夏時間があると1つの JST 時刻に2通り並ぶ -->
     <key>StartCalendarInterval</key>
     <array>
 {entries}
@@ -1463,8 +1506,31 @@ def _run(command: list[str]) -> tuple[bool, str]:
     return done.returncode == 0, output
 
 
+def _win_task_names(count: int = 4) -> list[str]:
+    """Windows で使いうるタスク名。夏時間があると時刻ごとに複数のタスクになる。"""
+    return [SCHEDULE_TASK_NAME] + [f"{SCHEDULE_TASK_NAME} {i}" for i in range(2, count + 1)]
+
+
+def _install_windows(hour: int, minute: int, weekdays: list[int]) -> tuple[bool, str]:
+    """タスクスケジューラに登録する。ローカル時刻が複数になる場合は時刻ごとに作る。"""
+    remove_schedule()
+    groups: dict[tuple[int, int], list[int]] = {}
+    for day, h, m in local_fire_times(hour, minute, weekdays):
+        groups.setdefault((h, m), []).append(day)
+    task = " ".join(f'"{part}"' for part in [str(runner_path()), *_runner_args(hour, weekdays)])
+    done = []
+    for name, ((h, m), days) in zip(_win_task_names(len(groups)), sorted(groups.items())):
+        ok, output = _run(["schtasks", "/Create", "/TN", name, "/TR", task, "/SC", "WEEKLY",
+                           "/D", ",".join(_WIN_WEEKDAY[d] for d in sorted(days)),
+                           "/ST", f"{h:02d}:{m:02d}", "/F"])
+        if not ok:
+            return False, output or f"{name} を登録できませんでした"
+        done.append(f"{name}（{'・'.join(WEEKDAY_LABELS[d] for d in sorted(days))} {h:02d}:{m:02d}）")
+    return True, "登録しました: " + " / ".join(done)
+
+
 def install_schedule(hour: int, minute: int, weekdays: list[int]) -> tuple[bool, str]:
-    """毎朝の自動実行を登録する（macOS: launchd / Windows: タスクスケジューラ）。"""
+    """毎朝の自動実行を登録する。時刻は**日本時間**で指定する。"""
     if not weekdays:
         return False, "実行する曜日を1つ以上選んでください"
     ok, message = ensure_runner()
@@ -1472,11 +1538,7 @@ def install_schedule(hour: int, minute: int, weekdays: list[int]) -> tuple[bool,
         return False, message
 
     if platform.system() == "Windows":
-        days = ",".join(_WIN_WEEKDAY[d] for d in sorted(weekdays))
-        ok, output = _run(["schtasks", "/Create", "/TN", SCHEDULE_TASK_NAME,
-                           "/TR", f'"{runner_path()}"', "/SC", "WEEKLY",
-                           "/D", days, "/ST", f"{hour:02d}:{minute:02d}", "/F"])
-        return ok, output or ("登録しました" if ok else "登録に失敗しました")
+        return _install_windows(hour, minute, weekdays)
 
     path = _plist_path()
     try:
@@ -1492,8 +1554,9 @@ def install_schedule(hour: int, minute: int, weekdays: list[int]) -> tuple[bool,
 def remove_schedule() -> tuple[bool, str]:
     """登録した自動実行を解除する。"""
     if platform.system() == "Windows":
-        ok, output = _run(["schtasks", "/Delete", "/TN", SCHEDULE_TASK_NAME, "/F"])
-        return ok, output or ("解除しました" if ok else "解除できませんでした")
+        removed = [name for name in _win_task_names()
+                   if _run(["schtasks", "/Delete", "/TN", name, "/F"])[0]]
+        return bool(removed), ("解除しました" if removed else "登録されていません")
     path = _plist_path()
     _run(["launchctl", "unload", str(path)])
     try:
@@ -1507,26 +1570,36 @@ def remove_schedule() -> tuple[bool, str]:
 def schedule_status() -> tuple[bool, str]:
     """いま自動実行が登録されているかを調べる。"""
     if platform.system() == "Windows":
-        ok, output = _run(["schtasks", "/Query", "/TN", SCHEDULE_TASK_NAME])
-        return ok, output if ok else "登録されていません"
+        found = [name for name in _win_task_names()
+                 if _run(["schtasks", "/Query", "/TN", name])[0]]
+        return bool(found), ("登録済みです: " + "、".join(found) if found else "登録されていません")
     path = _plist_path()
     if not path.exists():
         return False, "登録されていません"
-    ok, output = _run(["launchctl", "list", SCHEDULE_LABEL])
+    ok, _ = _run(["launchctl", "list", SCHEDULE_LABEL])
     if ok:
         return True, f"登録済みです（{path.name}）"
     return False, f"plist はありますが、読み込まれていません（{path}）"
 
 
 def run_schedule_now() -> tuple[bool, str]:
-    """登録した処理をいますぐ1回実行する（動作確認用）。"""
+    """登録した処理をいますぐ1回実行する（動作確認用）。
+
+    日本時間ゲートを1回だけ素通りさせる印を置いてから、スケジューラ経由で起動する。
+    こうすると、実際の定時実行とまったく同じ経路で動作を確認できる。
+    """
+    try:
+        FORCE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+        FORCE_FLAG.write_text("1", encoding="utf-8")
+    except OSError as exc:
+        return False, f"実行の印を置けません: {exc}"
     if platform.system() == "Windows":
         return _run(["schtasks", "/Run", "/TN", SCHEDULE_TASK_NAME])
     return _run(["launchctl", "start", SCHEDULE_LABEL])
 
 
 def describe_schedule(hour: int, minute: int, weekdays: list[int]) -> str:
-    """設定内容を日本語1行で説明する。"""
+    """設定内容を日本語1行で説明する（時刻は日本時間）。"""
     if not weekdays:
         return "曜日が選ばれていません"
     if sorted(weekdays) == [0, 1, 2, 3, 4]:
@@ -1535,7 +1608,30 @@ def describe_schedule(hour: int, minute: int, weekdays: list[int]) -> str:
         days = "毎日"
     else:
         days = "・".join(WEEKDAY_LABELS[d] for d in sorted(weekdays))
-    return f"{days} の {hour:02d}:{minute:02d} に実行します"
+    return f"{days} の {hour:02d}:{minute:02d}（日本時間）に実行します"
+
+
+def describe_local_schedule(hour: int, minute: int, weekdays: list[int]) -> str:
+    """ローカル時刻でいつ起動されるかを説明する。JST と同じ土地なら空文字。"""
+    if local_matches_jst():
+        return ""
+    fires = local_fire_times(hour, minute, weekdays)
+    if not fires:
+        return ""
+    listed = "、".join(f"{WEEKDAY_LABELS[d]} {h:02d}:{m:02d}" for d, h, m in fires)
+    tail = ("（夏時間の切り替わりで2通りになるため両方を予約し、"
+            "日本時間で正しい回だけを実行します）" if len(fires) > len(weekdays) else "")
+    return f"この端末の時刻では {listed} に起動します{tail}"
+
+
+def wake_command(hour: int, minute: int, weekdays: list[int], lead: int = 6) -> str:
+    """スリープからの自動起床を設定する pmset コマンド（macOS 用・要 sudo）。"""
+    fires = local_fire_times(hour, minute, weekdays)
+    if not fires:
+        return ""
+    at = max(0, min(h * 60 + m for _, h, m in fires) - lead)
+    days = "".join(_PMSET_WEEKDAY[d] for d in sorted({d for d, _, _ in fires}))
+    return f"sudo pmset repeat wakeorpoweron {days} {at // 60:02d}:{at % 60:02d}:00"
 
 
 # ===========================================================
