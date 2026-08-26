@@ -41,6 +41,10 @@ JST_HOUR=$(TZ=Asia/Tokyo date +%H)
 
 gate_skip() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') skip: $1（日本時間 ${JST_DATE} ${JST_HOUR}時）" >> "$GATE_LOG"
+    # 毎時起きるので、記録が際限なく伸びないよう末尾だけ残す
+    if [ "$(wc -l < "$GATE_LOG")" -gt 400 ]; then
+        tail -n 200 "$GATE_LOG" > "$GATE_LOG.tmp" && mv "$GATE_LOG.tmp" "$GATE_LOG"
+    fi
     exit 0
 }
 

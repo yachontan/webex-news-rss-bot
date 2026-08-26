@@ -784,9 +784,7 @@ def render_scheduler() -> None:
         st.caption(core.describe_schedule(when.hour, when.minute, weekdays))
         local = core.describe_local_schedule(when.hour, when.minute, weekdays)
         if local:
-            st.warning("**このパソコンの時計は日本時間とずれています。**\n\n" + local
-                       + "\n\n配信そのものは日本時間どおりに行われます。",
-                       icon=":material/public:")
+            st.caption(local)
 
     col_a, col_b, col_c = st.columns(3)
     with col_a:

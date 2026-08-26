@@ -261,9 +261,7 @@ def step_schedule() -> None:
     print(f"  {core.describe_schedule(hour, minute, weekdays)}")
     local = core.describe_local_schedule(hour, minute, weekdays)
     if local:
-        print("  ⚠️  このパソコンの時計は日本時間とずれています。")
-        print(f"      {local}")
-        print("      配信そのものは日本時間どおりに行われます。")
+        print(f"  {local}")
     if not _ask_yes("  この内容で登録しますか？"):
         print("  中止しました。")
         return

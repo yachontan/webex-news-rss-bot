@@ -67,6 +67,8 @@ goto :gatepass
 
 :gateskip
 echo %DATE% %TIME% skip: %GATE_REASON%（日本時間 %JST_DATE% %JST_HOUR%時）>> "%GATE_LOG%"
+rem 毎時起きるので、記録が際限なく伸びないよう末尾だけ残す
+powershell -NoProfile -Command "$p='%GATE_LOG%'; if((Get-Content $p).Count -gt 400){ Get-Content $p -Tail 200 | Set-Content $p }" >nul 2>&1
 exit /b 0
 
 :gatepass

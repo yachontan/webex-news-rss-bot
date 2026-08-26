@@ -1392,37 +1392,18 @@ _WIN_WEEKDAY = {0: "MON", 1: "TUE", 2: "WED", 3: "THU", 4: "FRI", 5: "SAT", 6: "
 _PMSET_WEEKDAY = {0: "M", 1: "T", 2: "W", 3: "R", 4: "F", 5: "S", 6: "U"}
 
 # 配信時刻は**つねに日本時間**で指定する。投稿の見出しの日付、記事に付く「JST」表記、
-# 月曜だけ週末分をまとめる判定は、すべて本体側が JST で処理している。端末のタイムゾーンで
-# 予約すると、時差のある土地では内容と配信時刻がずれる（例: 米西海岸の 09:01 = JST 翌 01:01）。
+# 月曜だけ週末分をまとめる判定は、すべて本体側が JST で処理している。
+#
+# ところが OS のスケジューラは「ローカル時刻」でしか予約できないうえ、その「ローカル」が
+# 何を指すかは当てにならない。実測した例では、macOS の launchd がカレンダー計算に
+# Asia/Tokyo を使いながら、起動したプロセスには America/Los_Angeles を渡していた
+# （launchd は起動時のタイムゾーンを抱え込み、あとから変えても追随しないことがある）。
+# そのため「JST をローカル時刻へ換算して予約する」やり方は当てにならない。
+#
+# そこで予約は**毎時 1 分**に固定し、配信するかどうかは実行時に run_rssbot 側が
+# 日本時間を見て決める。こうすると端末のタイムゾーンにも夏時間にも一切依存しない。
 JST = timezone(timedelta(hours=9))
 FORCE_FLAG = REPO_ROOT / "log" / ".force_run"
-
-
-def local_fire_times(hour: int, minute: int, weekdays: list[int],
-                     days: int = 366) -> list[tuple[int, int, int]]:
-    """JST の指定時刻を端末のローカル時刻に直した (曜日, 時, 分) の一覧を返す。
-
-    launchd もタスクスケジューラも「端末のローカル時刻」でしか予約できない。夏時間の
-    ある土地では、同じ JST 時刻に当たるローカル時刻が年に2通りになるため、1年分を
-    走査して実際に現れる組み合わせをすべて拾い、その全部を予約する。
-    どちらが本当の配信回かは、実行時に run_rssbot 側の日本時間ゲートが判定する。
-    """
-    if not weekdays:
-        return []
-    base = datetime.now(JST).replace(hour=hour, minute=minute, second=0, microsecond=0)
-    found: dict[tuple[int, int, int], None] = {}
-    for offset in range(days):
-        moment = base + timedelta(days=offset)
-        if moment.weekday() in weekdays:
-            local = moment.astimezone()      # その瞬間の夏時間まで含めて変換される
-            found[(local.weekday(), local.hour, local.minute)] = None
-    return sorted(found)
-
-
-def local_matches_jst() -> bool:
-    """端末のタイムゾーンが、いま日本時間と同じかどうか。"""
-    now = datetime.now(JST)
-    return now.astimezone().utcoffset() == now.utcoffset()
 
 
 def _plist_path() -> Path:
@@ -1436,7 +1417,7 @@ def runner_path() -> Path:
 
 
 def _runner_args(hour: int, weekdays: list[int]) -> list[str]:
-    """ラッパーに渡す日本時間ゲートの条件（配信する時・配信する曜日）。"""
+    """ラッパーに渡す日本時間のゲート条件（配信する時・配信する曜日）。"""
     return [str(hour), "".join(str(d + 1) for d in sorted(weekdays))]
 
 
@@ -1459,12 +1440,11 @@ def ensure_runner() -> tuple[bool, str]:
 
 
 def build_plist(hour: int, minute: int, weekdays: list[int]) -> str:
-    """launchd 用の plist を組み立てる（時刻は JST 指定、予約はローカル時刻）。"""
-    entries = "\n".join(
-        f"        <dict><key>Weekday</key><integer>{_MAC_WEEKDAY[d]}</integer>"
-        f"<key>Hour</key><integer>{h}</integer>"
-        f"<key>Minute</key><integer>{m}</integer></dict>"
-        for d, h, m in local_fire_times(hour, minute, weekdays))
+    """launchd 用の plist を組み立てる。
+
+    Hour を書かない StartCalendarInterval は「毎時その分」に発火する。配信するか
+    どうかは run_rssbot.sh が日本時間で判断するので、ここでは時刻を絞らない。
+    """
     arguments = "\n".join(
         f"        <string>{value}</string>"
         for value in ["/bin/bash", str(runner_path()), *_runner_args(hour, weekdays)])
@@ -1475,15 +1455,17 @@ def build_plist(hour: int, minute: int, weekdays: list[int]) -> str:
 <dict>
     <key>Label</key>
     <string>{SCHEDULE_LABEL}</string>
-    <!-- 引数は日本時間のゲート条件（配信する時 / 配信する曜日 1=月…7=日） -->
+    <!-- 引数は日本時間のゲート条件（配信する時 / 配信する曜日 1=月…7=日）。
+         実際に配信するのは、日本時間で {hour:02d}:{minute:02d} 以降の最初の1回だけ。 -->
     <key>ProgramArguments</key>
     <array>
 {arguments}
     </array>
-    <!-- 予約はローカル時刻。夏時間があると1つの JST 時刻に2通り並ぶ -->
+    <!-- 毎時 {minute:02d} 分に様子を見にいく。端末のタイムゾーンが何であっても、
+         日本時間で正しい回だけが配信され、それ以外は即座に終了する。 -->
     <key>StartCalendarInterval</key>
     <array>
-{entries}
+        <dict><key>Minute</key><integer>{minute}</integer></dict>
     </array>
     <key>WorkingDirectory</key>
     <string>{REPO_ROOT}</string>
@@ -1507,26 +1489,17 @@ def _run(command: list[str]) -> tuple[bool, str]:
 
 
 def _win_task_names(count: int = 4) -> list[str]:
-    """Windows で使いうるタスク名。夏時間があると時刻ごとに複数のタスクになる。"""
+    """Windows で使いうるタスク名。古い版が作った連番タスクの後始末にも使う。"""
     return [SCHEDULE_TASK_NAME] + [f"{SCHEDULE_TASK_NAME} {i}" for i in range(2, count + 1)]
 
 
 def _install_windows(hour: int, minute: int, weekdays: list[int]) -> tuple[bool, str]:
-    """タスクスケジューラに登録する。ローカル時刻が複数になる場合は時刻ごとに作る。"""
+    """タスクスケジューラに登録する。毎時起動し、配信するかは実行時に判断する。"""
     remove_schedule()
-    groups: dict[tuple[int, int], list[int]] = {}
-    for day, h, m in local_fire_times(hour, minute, weekdays):
-        groups.setdefault((h, m), []).append(day)
     task = " ".join(f'"{part}"' for part in [str(runner_path()), *_runner_args(hour, weekdays)])
-    done = []
-    for name, ((h, m), days) in zip(_win_task_names(len(groups)), sorted(groups.items())):
-        ok, output = _run(["schtasks", "/Create", "/TN", name, "/TR", task, "/SC", "WEEKLY",
-                           "/D", ",".join(_WIN_WEEKDAY[d] for d in sorted(days)),
-                           "/ST", f"{h:02d}:{m:02d}", "/F"])
-        if not ok:
-            return False, output or f"{name} を登録できませんでした"
-        done.append(f"{name}（{'・'.join(WEEKDAY_LABELS[d] for d in sorted(days))} {h:02d}:{m:02d}）")
-    return True, "登録しました: " + " / ".join(done)
+    ok, output = _run(["schtasks", "/Create", "/TN", SCHEDULE_TASK_NAME, "/TR", task,
+                       "/SC", "HOURLY", "/MO", "1", "/ST", f"00:{minute:02d}", "/F"])
+    return ok, output or ("登録しました" if ok else "登録に失敗しました")
 
 
 def install_schedule(hour: int, minute: int, weekdays: list[int]) -> tuple[bool, str]:
@@ -1612,26 +1585,36 @@ def describe_schedule(hour: int, minute: int, weekdays: list[int]) -> str:
 
 
 def describe_local_schedule(hour: int, minute: int, weekdays: list[int]) -> str:
-    """ローカル時刻でいつ起動されるかを説明する。JST と同じ土地なら空文字。"""
-    if local_matches_jst():
+    """予約の仕組みを1行で説明する。"""
+    if not weekdays:
         return ""
-    fires = local_fire_times(hour, minute, weekdays)
-    if not fires:
-        return ""
-    listed = "、".join(f"{WEEKDAY_LABELS[d]} {h:02d}:{m:02d}" for d, h, m in fires)
-    tail = ("（夏時間の切り替わりで2通りになるため両方を予約し、"
-            "日本時間で正しい回だけを実行します）" if len(fires) > len(weekdays) else "")
-    return f"この端末の時刻では {listed} に起動します{tail}"
+    return (f"予約そのものは毎時 {minute:02d} 分に入りますが、実際に配信するのは"
+            f"日本時間で {hour:02d}:{minute:02d} を過ぎた最初の1回だけです"
+            "（端末のタイムゾーンや夏時間に左右されないようにするため）。")
 
 
-def wake_command(hour: int, minute: int, weekdays: list[int], lead: int = 6) -> str:
-    """スリープからの自動起床を設定する pmset コマンド（macOS 用・要 sudo）。"""
-    fires = local_fire_times(hour, minute, weekdays)
-    if not fires:
+def _local_of_jst(hour: int, minute: int, weekday: int) -> datetime:
+    """日本時間の「その曜日の hour:minute」を、この端末のローカル時刻で返す。"""
+    base = datetime.now(JST).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    for offset in range(8):
+        moment = base + timedelta(days=offset)
+        if moment.weekday() == weekday:
+            return moment.astimezone()
+    return base.astimezone()
+
+
+def wake_command(hour: int, minute: int, weekdays: list[int], lead: int = 66) -> str:
+    """スリープからの自動起床を設定する pmset コマンド（macOS 用・要 sudo）。
+
+    pmset は端末のローカル時刻で動くため、日本時間の配信時刻をローカルへ直して指定する。
+    夏時間で1時間ずれても間に合うよう、既定では1時間強だけ前倒しして起こす。
+    """
+    if not weekdays:
         return ""
-    at = max(0, min(h * 60 + m for _, h, m in fires) - lead)
-    days = "".join(_PMSET_WEEKDAY[d] for d in sorted({d for d, _, _ in fires}))
-    return f"sudo pmset repeat wakeorpoweron {days} {at // 60:02d}:{at % 60:02d}:00"
+    moments = [_local_of_jst(hour, minute, d) - timedelta(minutes=lead) for d in sorted(weekdays)]
+    earliest = min(m.hour * 60 + m.minute for m in moments)
+    days = "".join(_PMSET_WEEKDAY[m.weekday()] for m in moments)
+    return f"sudo pmset repeat wakeorpoweron {days} {earliest // 60:02d}:{earliest % 60:02d}:00"
 
 
 # ===========================================================
