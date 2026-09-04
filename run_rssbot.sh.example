@@ -50,6 +50,7 @@ gate_skip() {
 
 if [ -f "$FORCE_FLAG" ]; then
     rm -f "$FORCE_FLAG"
+    FORCED="1"      # 「いますぐ1回実行」。判定を飛ばし、回線が怪しくても実行して結果を見せる
 else
     case "$TARGET_DAYS" in
         *"$JST_DAY"*) ;;
@@ -61,8 +62,10 @@ else
     if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$JST_DATE" ]; then
         gate_skip "この日はすでに配信済み"
     fi
+    FORCED=""
 fi
-echo "$JST_DATE" > "$STAMP"
+# 「配信済み」の記録は、実際に送れてから書く（下）。ここで書いてしまうと、
+# 回線断で全滅した回でもその日が終わったことになり、再試行されなくなる。
 
 # --- ネットワーク/DNS 準備待ち / Wait for network readiness ---
 # スリープ復帰直後などにネットワーク/DNS が未準備のまま launchd が発火すると、
@@ -81,8 +84,11 @@ while [ "$waited" -lt "$MAX_WAIT" ]; do
     sleep "$INTERVAL"
     waited=$((waited + INTERVAL))
 done
-if [ "$waited" -ge "$MAX_WAIT" ]; then
-    echo "[run_rssbot] WARN: network not confirmed after ${MAX_WAIT}s; proceeding anyway ($(date '+%Y-%m-%d %H:%M:%S'))" >> "$LOG_FILE"
+if [ "$waited" -ge "$MAX_WAIT" ] && [ -z "$FORCED" ]; then
+    # 名前解決ができない状態で走らせても全チャンネル失敗するだけなので、
+    # 記録を残さずに終わる。次の毎時チェックでやり直される。
+    echo "[run_rssbot] 回線が確認できないため中止（次の毎時チェックで再試行）" >> "$LOG_FILE"
+    gate_skip "回線を確認できなかった"
 fi
 
 # Python の実行パス / Python interpreter:
@@ -92,4 +98,19 @@ fi
 # --weekend-catchup: 月曜の実行時のみ取得期間を72時間(金土日)に自動拡張する
 #   （平日9時運用のため、月曜は週末の未配信分をまとめて配信）。月曜以外は無効=24h。
 #   毎日実行する運用ならこのフラグは外してよい。
-"$TARGET_DIR/bin/python" "$TARGET_DIR/webex-news-rss-bot.py" --weekend-catchup >> "$LOG_FILE" 2>> "$ERR_FILE"
+# 実行中にスリープすると、復帰後に名前解決が壊れて全チャンネル失敗することがある。
+# macOS では caffeinate で寝かせないようにする（無い環境ではそのまま実行）。
+KEEP_AWAKE=""
+command -v caffeinate >/dev/null 2>&1 && KEEP_AWAKE="caffeinate -i -m -s"
+
+$KEEP_AWAKE "$TARGET_DIR/bin/python" "$TARGET_DIR/webex-news-rss-bot.py" --weekend-catchup \
+    >> "$LOG_FILE" 2>> "$ERR_FILE"
+status=$?
+
+# 終了コード 2 = 1件も送れなかった（一時的な障害）。記録を残さず、次の毎時チェックに任せる。
+if [ "$status" -eq 2 ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') retry: 1件も送信できなかったため再試行します（日本時間 ${JST_DATE}）" >> "$GATE_LOG"
+    exit 0
+fi
+echo "$JST_DATE" > "$STAMP"
+exit "$status"

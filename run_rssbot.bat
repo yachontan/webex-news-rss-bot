@@ -72,8 +72,11 @@ powershell -NoProfile -Command "$p='%GATE_LOG%'; if((Get-Content $p).Count -gt 4
 exit /b 0
 
 :gatepass
-if exist "%FORCE_FLAG%" del "%FORCE_FLAG%" >nul 2>&1
-echo %JST_DATE%> "%STAMP%"
+set "FORCED="
+if exist "%FORCE_FLAG%" set "FORCED=1"
+if defined FORCED del "%FORCE_FLAG%" >nul 2>&1
+rem 「配信済み」の記録は、実際に送れてから書く（末尾）。ここで書くと、
+rem 回線断で全滅した回でもその日が終わったことになり、再試行されなくなる。
 
 rem --- タイムスタンプ（ロケールに依存しない形で取得）/ Locale-independent timestamp ---
 set "TS="
@@ -105,8 +108,10 @@ if not errorlevel 1 (
     goto :netready
 )
 if %WAITED% GEQ %MAX_WAIT% (
-    echo [run_rssbot] WARN: network not confirmed after %MAX_WAIT%s; proceeding anyway>> "%LOG%"
-    goto :netready
+    if defined FORCED goto :netready
+    echo [run_rssbot] 回線が確認できないため中止（次の毎時チェックで再試行）>> "%LOG%"
+    set "GATE_REASON=回線を確認できなかった"
+    goto :gateskip
 )
 rem timeout は非対話セッションで失敗することがあるため ping で待つ
 ping -n %INTERVAL% 127.0.0.1 >nul 2>&1
@@ -117,4 +122,12 @@ goto :netcheck
 rem --weekend-catchup: 月曜の実行時だけ取得期間を72時間（金土日）へ自動拡張する。
 rem 毎日実行する運用ならこのフラグは外してよい。
 "%PY%" webex-news-rss-bot.py --weekend-catchup >> "%LOG%" 2>> "%ERR%"
-exit /b %ERRORLEVEL%
+set "STATUS=%ERRORLEVEL%"
+
+rem 終了コード 2 = 1件も送れなかった（一時的な障害）。記録を残さず次の毎時チェックに任せる。
+if "%STATUS%"=="2" (
+    echo %DATE% %TIME% retry: 1件も送信できなかったため再試行します（日本時間 %JST_DATE%）>> "%GATE_LOG%"
+    exit /b 0
+)
+echo %JST_DATE%> "%STAMP%"
+exit /b %STATUS%

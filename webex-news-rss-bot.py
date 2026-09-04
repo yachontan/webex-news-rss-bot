@@ -1504,27 +1504,51 @@ def rerank_with_llm(
 # Webex 送信 / Webex messaging
 # ===========================================================
 
+# 送信の成否を数える。ラッパー(run_rssbot.sh)がこの結果を終了コードで受け取り、
+# 「1件も送れなかった＝一時的な障害」のときだけ次の毎時チェックで再試行する。
+SEND_RESULTS = {"ok": 0, "ng": 0}
+
+# 回線やDNSが一時的に不安定なとき（スリープ復帰直後、VPN の張り直しなど）に
+# 1回の失敗で記事を落とさないよう、つなぎ直しの失敗だけは間を置いて試し直す。
+# 認証エラーなど、待っても直らない失敗は即座にあきらめる。
+SEND_ATTEMPTS = 3
+SEND_RETRY_WAIT = (5, 20)
+
+
+def _post_webex(room_id: str, message_text: str, bot_token: str):
+    """Webex へ1回だけ送る。呼び出し元が再試行を判断する。"""
+    return requests.post(
+        "https://webexapis.com/v1/messages",
+        headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+        data=json.dumps({"roomId": room_id, "markdown": message_text}),
+        timeout=15, verify=SSL_VERIFY,
+    )
+
+
 def send_webex_message(room_id: str, message_text: str, bot_token: str) -> bool:
     """
     Webexスペースにメッセージを送信します。
     Sends a Markdown message to the specified Webex space.
     """
-    url = "https://webexapis.com/v1/messages"
-    headers = {
-        "Authorization": f"Bearer {bot_token}",
-        "Content-Type":  "application/json",
-    }
-    payload = {"roomId": room_id, "markdown": message_text}
-
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=15, verify=SSL_VERIFY)
-        response.raise_for_status()
-        print("  [OK] Webexメッセージを送信しました。")
-        return True
-    except requests.exceptions.RequestException as e:
-        body = response.text if "response" in dir() else "N/A"
-        print(f"  [ERROR] Webexメッセージ送信失敗: {e} / レスポンス: {body}")
-        return False
+    for attempt in range(1, SEND_ATTEMPTS + 1):
+        try:
+            _post_webex(room_id, message_text, bot_token).raise_for_status()
+            print("  [OK] Webexメッセージを送信しました。")
+            SEND_RESULTS["ok"] += 1
+            return True
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt == SEND_ATTEMPTS:
+                print(f"  [ERROR] Webexメッセージ送信失敗（{attempt}回試行）: {e}")
+                break
+            wait = SEND_RETRY_WAIT[min(attempt - 1, len(SEND_RETRY_WAIT) - 1)]
+            print(f"  [WARN] 送信に失敗（{attempt}/{SEND_ATTEMPTS}回目）。{wait}秒待って試し直します。")
+            time.sleep(wait)
+        except requests.exceptions.RequestException as e:
+            body = getattr(getattr(e, "response", None), "text", "N/A")
+            print(f"  [ERROR] Webexメッセージ送信失敗: {e} / レスポンス: {body}")
+            break
+    SEND_RESULTS["ng"] += 1
+    return False
 
 
 def build_and_send(
@@ -2347,6 +2371,20 @@ def main() -> None:
         )
 
     print("\n=== 完了 / Done ===")
+    sys.exit(delivery_exit_code())
+
+
+def delivery_exit_code() -> int:
+    """配信結果を終了コードにする。
+
+    0 = 送信失敗なし / 1 = 一部失敗（送れた分があるので再試行しない）
+    2 = 1件も送れなかった（回線断などの一時障害とみなし、ラッパーが再試行する）
+    """
+    ok, ng = SEND_RESULTS["ok"], SEND_RESULTS["ng"]
+    if not ng:
+        return 0
+    print(f"  [結果] 送信成功 {ok} 件 / 送信失敗 {ng} 件")
+    return 1 if ok else 2
 
 
 if __name__ == "__main__":
