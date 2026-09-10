@@ -1400,8 +1400,9 @@ _PMSET_WEEKDAY = {0: "M", 1: "T", 2: "W", 3: "R", 4: "F", 5: "S", 6: "U"}
 # （launchd は起動時のタイムゾーンを抱え込み、あとから変えても追随しないことがある）。
 # そのため「JST をローカル時刻へ換算して予約する」やり方は当てにならない。
 #
-# そこで予約は**毎時 1 分**に固定し、配信するかどうかは実行時に run_rssbot 側が
+# そこで予約は**30分ごと**に固定し、配信するかどうかは実行時に run_rssbot 側が
 # 日本時間を見て決める。こうすると端末のタイムゾーンにも夏時間にも一切依存しない。
+# 30分刻みにしてあるのは、回線が繋がっていなくて見送った回を30分後にやり直すため。
 JST = timezone(timedelta(hours=9))
 FORCE_FLAG = REPO_ROOT / "log" / ".force_run"
 
@@ -1442,9 +1443,13 @@ def ensure_runner() -> tuple[bool, str]:
 def build_plist(hour: int, minute: int, weekdays: list[int]) -> str:
     """launchd 用の plist を組み立てる。
 
-    Hour を書かない StartCalendarInterval は「毎時その分」に発火する。配信するか
-    どうかは run_rssbot.sh が日本時間で判断するので、ここでは時刻を絞らない。
+    Hour を書かない StartCalendarInterval は「毎時その分」に発火する。それを30分ずらして
+    2つ並べ、30分ごとの起動にする。配信するかどうかは run_rssbot.sh が日本時間と
+    ネットワークの疎通で判断するので、ここでは時刻を絞らない。
     """
+    slots = "\n".join(
+        f"        <dict><key>Minute</key><integer>{(minute + offset) % 60}</integer></dict>"
+        for offset in (0, 30))
     arguments = "\n".join(
         f"        <string>{value}</string>"
         for value in ["/bin/bash", str(runner_path()), *_runner_args(hour, weekdays)])
@@ -1461,11 +1466,11 @@ def build_plist(hour: int, minute: int, weekdays: list[int]) -> str:
     <array>
 {arguments}
     </array>
-    <!-- 毎時 {minute:02d} 分に様子を見にいく。端末のタイムゾーンが何であっても、
-         日本時間で正しい回だけが配信され、それ以外は即座に終了する。 -->
+    <!-- 30分ごとに様子を見にいく。端末のタイムゾーンが何であっても、日本時間で
+         正しい回だけが配信される。回線が繋がっていなくて見送った回は30分後にやり直す。 -->
     <key>StartCalendarInterval</key>
     <array>
-        <dict><key>Minute</key><integer>{minute}</integer></dict>
+{slots}
     </array>
     <key>WorkingDirectory</key>
     <string>{REPO_ROOT}</string>
@@ -1498,7 +1503,7 @@ def _install_windows(hour: int, minute: int, weekdays: list[int]) -> tuple[bool,
     remove_schedule()
     task = " ".join(f'"{part}"' for part in [str(runner_path()), *_runner_args(hour, weekdays)])
     ok, output = _run(["schtasks", "/Create", "/TN", SCHEDULE_TASK_NAME, "/TR", task,
-                       "/SC", "HOURLY", "/MO", "1", "/ST", f"00:{minute:02d}", "/F"])
+                       "/SC", "MINUTE", "/MO", "30", "/ST", f"00:{minute:02d}", "/F"])
     return ok, output or ("登録しました" if ok else "登録に失敗しました")
 
 
@@ -1588,9 +1593,10 @@ def describe_local_schedule(hour: int, minute: int, weekdays: list[int]) -> str:
     """予約の仕組みを1行で説明する。"""
     if not weekdays:
         return ""
-    return (f"予約そのものは毎時 {minute:02d} 分に入りますが、実際に配信するのは"
-            f"日本時間で {hour:02d}:{minute:02d} を過ぎた最初の1回だけです"
-            "（端末のタイムゾーンや夏時間に左右されないようにするため）。")
+    return (f"予約そのものは30分ごとに入りますが、実際に配信するのは日本時間で "
+            f"{hour:02d}:{minute:02d} を過ぎた最初の1回だけです。"
+            "配信の前にネットワークの疎通を確かめ、繋がっていなければ見送って"
+            "30分後にやり直します。")
 
 
 def _local_of_jst(hour: int, minute: int, weekday: int) -> datetime:

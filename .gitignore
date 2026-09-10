@@ -18,6 +18,7 @@
 !check_rooms.py
 !check_rooms_ui.py
 !setup.py
+!check_network.py
 !wizard/
 !wizard/*.py
 !はじめに設定する.command

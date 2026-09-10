@@ -96,16 +96,34 @@ if not defined PY (
     exit /b 1
 )
 
-rem --- ネットワーク準備待ち（最大5分）/ Wait for network readiness (up to 5 min) ---
+rem --- 配信前のネットワーク疎通確認 / Pre-flight connectivity check ---
+rem  無線が切れている・DNS が返らない状態のまま走らせると、フィードは取れても
+rem  投稿先や要約APIの名前解決に失敗し、全チャンネルが空振りする。
+rem  そこで check_network.py で「DNS が引けるか＋期待した HTTP 応答か」を先に確かめる。
+rem  確認先の URL は urls.yml の healthcheck: に置いてある（コードに直書きしない）。
+rem  短く待って駄目なら配信を見送る。記録を残さないので、次の30分後の起動でやり直す。
 set /a WAITED=0
-set /a MAX_WAIT=300
-set /a INTERVAL=10
+set /a MAX_WAIT=120
+set /a INTERVAL=15
 
 :netcheck
-powershell -NoProfile -Command "try{$null = Invoke-WebRequest -Uri 'https://webexapis.com' -Method Head -TimeoutSec 8 -UseBasicParsing; exit 0}catch{exit 1}" >nul 2>&1
+"%PY%" check_network.py >> "%LOG%" 2>&1
 if not errorlevel 1 (
-    echo [run_rssbot] network ready after %WAITED%s>> "%LOG%"
+    echo [run_rssbot] 疎通確認OK（待ち %WAITED%秒）>> "%LOG%"
     goto :netready
+)
+if %WAITED% GEQ %MAX_WAIT% (
+    if defined FORCED goto :netready
+    echo [run_rssbot] 疎通確認に失敗したため配信を見送りました（30分後にやり直します）>> "%LOG%"
+    set "GATE_REASON=ネットワークの疎通確認に失敗（30分後に再試行）"
+    goto :gateskip
+)
+rem timeout は非対話セッションで失敗することがあるため ping で待つ
+ping -n %INTERVAL% 127.0.0.1 >nul 2>&1
+set /a WAITED=%WAITED%+%INTERVAL%
+goto :netcheck
+
+:netready
 )
 if %WAITED% GEQ %MAX_WAIT% (
     if defined FORCED goto :netready

@@ -9,8 +9,9 @@ rem
 rem  時刻は「日本時間」です / Times are Japan time (JST):
 rem    配信内容（見出しの日付、記事の JST 表記、月曜の週末まとめ）はすべて日本時間が
 rem    基準です。一方スケジューラはローカル時刻でしか予約できないため、ここでは
-rem    「毎時 01 分に様子を見にいく」タスクを登録し、実際に配信するかどうかは
-rem    run_rssbot.bat が日本時間を見て決めます。こうすると PC のタイムゾーンや
+rem    「30分ごとに様子を見にいく」タスクを登録し、実際に配信するかどうかは
+rem    run_rssbot.bat が日本時間とネットワークの疎通を見て決めます。繋がっていなければ
+rem    見送って30分後にやり直します。こうすると PC のタイムゾーンや
 rem    夏時間が何であっても、日本時間の平日 09:01 に配信されます。
 rem    配信しない回は何もせずすぐ終了し、理由が log\gate.log に残ります。
 rem
@@ -60,8 +61,8 @@ if not exist "%TARGET%" (
 )
 call :purge
 echo.
-echo 毎時 01 分に様子を見にいくタスクを登録します...
-schtasks /Create /TN "%TASKNAME%" /TR "\"%TARGET%\" %GATE_ARGS%" /SC HOURLY /MO 1 /ST 00:01 /F
+echo 30分ごとに様子を見にいくタスクを登録します...
+schtasks /Create /TN "%TASKNAME%" /TR "\"%TARGET%\" %GATE_ARGS%" /SC MINUTE /MO 30 /ST 00:01 /F
 if errorlevel 1 (
     echo.
     echo   [NG] 登録に失敗しました。上のメッセージを確認してください。

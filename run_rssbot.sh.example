@@ -67,34 +67,34 @@ fi
 # 「配信済み」の記録は、実際に送れてから書く（下）。ここで書いてしまうと、
 # 回線断で全滅した回でもその日が終わったことになり、再試行されなくなる。
 
-# --- ネットワーク/DNS 準備待ち / Wait for network readiness ---
-# スリープ復帰直後などにネットワーク/DNS が未準備のまま launchd が発火すると、
-# 大量のフィード取得が DNS 解決失敗し、収集が異常遅延・ハングする。
-# 投稿先(webexapis.com)へ疎通できるまで最大5分待ってから本体を起動する。
-# curl は HTTP 応答が返れば(4xx/5xx でも)成功扱い＝DNS+TCP+TLS の疎通確認になる。
-NET_CHECK_HOST="https://webexapis.com"
-MAX_WAIT=300      # 最大待機秒数（5分）
-INTERVAL=10       # 再試行間隔（秒）
+# --- 配信前のネットワーク疎通確認 / Pre-flight connectivity check ---
+# 無線が切れている・スリープ復帰直後で DNS が返らない状態のまま走らせると、
+# フィードは取れても投稿先や要約APIの名前解決に失敗し、全チャンネルが空振りする。
+# そこで check_network.py で「DNS が引けるか＋期待した HTTP 応答か」を先に確かめる。
+# 確認先の URL は urls.yml の healthcheck: に置いてある（コードに直書きしない）。
+# 短く待って駄目なら配信を見送る。記録を残さないので、次の30分後の起動でやり直される。
+MAX_WAIT=120      # この実行の中で待つ上限（秒）
+INTERVAL=15       # 再確認の間隔（秒）
+NET_OK=""
 waited=0
-while [ "$waited" -lt "$MAX_WAIT" ]; do
-    if curl -sS --head --max-time 8 "$NET_CHECK_HOST" >/dev/null 2>&1; then
-        echo "[run_rssbot] network ready after ${waited}s ($(date '+%Y-%m-%d %H:%M:%S'))" >> "$LOG_FILE"
+while :; do
+    if "$TARGET_DIR/bin/python" "$TARGET_DIR/check_network.py" >> "$LOG_FILE" 2>&1; then
+        NET_OK="1"
+        echo "[run_rssbot] 疎通確認OK（待ち ${waited}秒 / $(date '+%Y-%m-%d %H:%M:%S')）" >> "$LOG_FILE"
+        break
+    fi
+    if [ "$waited" -ge "$MAX_WAIT" ]; then
         break
     fi
     sleep "$INTERVAL"
     waited=$((waited + INTERVAL))
 done
-if [ "$waited" -ge "$MAX_WAIT" ] && [ -z "$FORCED" ]; then
-    # 名前解決ができない状態で走らせても全チャンネル失敗するだけなので、
-    # 記録を残さずに終わる。次の毎時チェックでやり直される。
-    echo "[run_rssbot] 回線が確認できないため中止（次の毎時チェックで再試行）" >> "$LOG_FILE"
-    gate_skip "回線を確認できなかった"
+
+if [ -z "$NET_OK" ] && [ -z "$FORCED" ]; then
+    echo "[run_rssbot] 疎通確認に失敗したため配信を見送りました（30分後にやり直します）" >> "$LOG_FILE"
+    gate_skip "ネットワークの疎通確認に失敗（30分後に再試行）"
 fi
 
-# Python の実行パス / Python interpreter:
-#   リポジトリ直下に venv を作った場合（python3 -m venv .）は "$TARGET_DIR/bin/python"。
-#   venv/ サブディレクトリに作った場合は "$TARGET_DIR/venv/bin/python" に書き換える。
-#
 # --weekend-catchup: 月曜の実行時のみ取得期間を72時間(金土日)に自動拡張する
 #   （平日9時運用のため、月曜は週末の未配信分をまとめて配信）。月曜以外は無効=24h。
 #   毎日実行する運用ならこのフラグは外してよい。

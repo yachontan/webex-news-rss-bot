@@ -62,3 +62,16 @@ feeds:
   # RSS が無いサイトは Google News 検索フィードで代替できる
   # Sites without RSS can be covered via Google News search feeds:
   # - https://news.google.com/rss/search?q=Anthropic&hl=ja&gl=JP&ceid=JP:ja
+
+  # 配信前のネットワーク疎通確認 / Pre-flight connectivity check
+  # 無線が切れている・DNS が返らない状態で配信すると全チャンネル空振りするため、
+  # 走らせる前にここへ書いた URL を確かめる（DNS が引けるか＋期待した HTTP 応答か）。
+  # 1つでも到達できなければ配信を見送り、30分後の再試行に任せる。
+  # このエントリは urls / group キーを持たないため、RSS 収集からは無視される。
+  - healthcheck:
+      timeout: 10
+      urls:
+      - url: https://www.cisco.com
+        expect: [200]
+      - url: https://webexapis.com/v1/ping
+        expect: [200]
