@@ -13,15 +13,8 @@
 #   1. 文字列                       : 通常のフィードURL
 #   2. {group: <名前>, urls: [...]} : 名前付きグループ（channels の source_groups から参照）
 #   3. {weather: {...}}             : 天気API設定（RSSではないので収集対象から除外される）
-#   4. {cisco_advisory: {...}}      : CVSS取得API設定（同上）
 # ============================================================
 feeds:
-
-  # ── Cisco Security Advisory の CVSS 取得API（任意）/ CVSS lookup (optional) ──
-  #   Cisco の advisory 記事に CVSS バッジ（🔴 CVSS 9.1 など）を付けるために使う。
-  #   {adv_id} が Advisory ID に置き換わる。このブロックが無い場合はバッジを付けない。
-  - cisco_advisory:
-      cvrf_url: https://sec.cloudapps.cisco.com/security/center/contentxml/CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
 
   # ── 天気API（任意）/ Weather API (optional) ──
   #   デイリーダイジェスト（channels の digest: true）で使う。Open-Meteo は APIキー不要。
@@ -36,7 +29,11 @@ feeds:
   #   channels の source_groups から参照する専用フィードをまとめる。
   #   URL の正本をここに一本化し、channels 側にはグループ名だけを書く。
   #   ここに入れたフィード由来の記事は、参照したチャンネルが専有する。
+  #   Cisco の advisory グループには cvrf_url を添えられる。付けると記事に
+  #   CVSS バッジ（🔴 CVSS 9.1 など）が付く（{adv_id} が Advisory ID に置き換わる）。
+  #   「どこから集めるか」と「どう色を付けるか」を1か所にまとめるための書き方。
   - group: cisco-advisory
+    cvrf_url: https://sec.cloudapps.cisco.com/security/center/contentxml/CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
     urls:
       - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
 

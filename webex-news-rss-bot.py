@@ -179,27 +179,42 @@ def load_url_groups(path: str = URLS_FILE) -> dict[str, list[str]]:
 
 def load_advisory_config(path: str = URLS_FILE) -> str:
     """
-    urls.yml 内の cisco_advisory エントリから CVRF API の URL 雛形を読み込みます。
-    Loads the CVRF URL template from the `cisco_advisory` entry in urls.yml.
+    urls.yml から CVRF API の URL 雛形を読み込みます。
+    Loads the CVRF URL template from urls.yml.
 
-    形式 / Format:
-        - cisco_advisory:
-            cvrf_url: https://.../CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
+    形式 / Format（推奨）: Advisory を集めるグループに直接書く。
+        - group: Cisco-Security-Advisories
+          urls:
+            - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
+          cvrf_url: https://.../CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
+
+    「どこから集めるか」と「その記事に CVSS をどう付けるか」は同じ Advisory の話なので、
+    1つのエントリにまとめる。旧形式（独立した `- cisco_advisory:` エントリ）も読む。
 
     `{adv_id}` が Advisory ID に置き換わる。URL の正本は urls.yml に集約し、
     Python コードには直書きしない。未定義の場合は空文字を返す
     （その場合 CVSS バッジの付与をスキップする）。
-    cisco_advisory エントリは urls / group キーを持たないため RSS 収集からは無視される。
     """
+    def _valid(template: str, where: str) -> str:
+        template = (template or "").strip()
+        if template and "{adv_id}" not in template:
+            print(f"  [WARN] urls.yml {where}: cvrf_url に {{adv_id}} が含まれていません")
+            return ""
+        return template
+
+    fallback = ""
     for item in _read_feeds(path):
-        if not (isinstance(item, dict) and item.get("cisco_advisory")):
+        if not isinstance(item, dict):
             continue
-        template = str((item["cisco_advisory"] or {}).get("cvrf_url") or "").strip()
-        if template and "{adv_id}" in template:
-            return template
-        if template:
-            print("  [WARN] urls.yml cisco_advisory: cvrf_url に {adv_id} が含まれていません")
-    return ""
+        if item.get("group"):
+            found = _valid(item.get("cvrf_url"), f"group: {item['group']}")
+            if found:
+                return found
+        elif item.get("cisco_advisory"):
+            # 旧形式。グループ側に書かれていればそちらを優先する
+            fallback = fallback or _valid(
+                (item["cisco_advisory"] or {}).get("cvrf_url"), "cisco_advisory")
+    return fallback
 
 
 def load_weather_config(path: str = URLS_FILE) -> dict | None:
@@ -1016,7 +1031,7 @@ def resolve_categories_from_name(name: str, category_keywords: dict[str, list[st
     return [n] if n and n in category_keywords else []
 
 
-def load_bots(path: str = CHANNELS_FILE) -> list[dict]:
+def load_channels(path: str = CHANNELS_FILE) -> list[dict]:
     """
     channels.yml の channels: セクションからマルチチャンネル設定を読み込みます。
     ファイルが無い、または channels: が無い場合は空リスト＝シングルボットモード。
@@ -1644,27 +1659,51 @@ def rerank_with_llm(
 # Webex 送信 / Webex messaging
 # ===========================================================
 
+# 送信の成否を数える。ラッパー(run_rssbot.sh)がこの結果を終了コードで受け取り、
+# 「1件も送れなかった＝一時的な障害」のときだけ次の毎時チェックで再試行する。
+SEND_RESULTS = {"ok": 0, "ng": 0}
+
+# 回線やDNSが一時的に不安定なとき（スリープ復帰直後、VPN の張り直しなど）に
+# 1回の失敗で記事を落とさないよう、つなぎ直しの失敗だけは間を置いて試し直す。
+# 認証エラーなど、待っても直らない失敗は即座にあきらめる。
+SEND_ATTEMPTS = 3
+SEND_RETRY_WAIT = (5, 20)
+
+
+def _post_webex(room_id: str, message_text: str, bot_token: str):
+    """Webex へ1回だけ送る。呼び出し元が再試行を判断する。"""
+    return requests.post(
+        get_endpoint("webex", "messages"),
+        headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+        data=json.dumps({"roomId": room_id, "markdown": message_text}),
+        timeout=15, verify=SSL_VERIFY,
+    )
+
+
 def send_webex_message(room_id: str, message_text: str, bot_token: str) -> bool:
     """
     Webexスペースにメッセージを送信します。
     Sends a Markdown message to the specified Webex space.
     """
-    url = get_endpoint("webex", "messages")
-    headers = {
-        "Authorization": f"Bearer {bot_token}",
-        "Content-Type":  "application/json",
-    }
-    payload = {"roomId": room_id, "markdown": message_text}
-
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=15, verify=SSL_VERIFY)
-        response.raise_for_status()
-        print("  [OK] Webexメッセージを送信しました。")
-        return True
-    except requests.exceptions.RequestException as e:
-        body = response.text if "response" in dir() else "N/A"
-        print(f"  [ERROR] Webexメッセージ送信失敗: {e} / レスポンス: {body}")
-        return False
+    for attempt in range(1, SEND_ATTEMPTS + 1):
+        try:
+            _post_webex(room_id, message_text, bot_token).raise_for_status()
+            print("  [OK] Webexメッセージを送信しました。")
+            SEND_RESULTS["ok"] += 1
+            return True
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt == SEND_ATTEMPTS:
+                print(f"  [ERROR] Webexメッセージ送信失敗（{attempt}回試行）: {e}")
+                break
+            wait = SEND_RETRY_WAIT[min(attempt - 1, len(SEND_RETRY_WAIT) - 1)]
+            print(f"  [WARN] 送信に失敗（{attempt}/{SEND_ATTEMPTS}回目）。{wait}秒待って試し直します。")
+            time.sleep(wait)
+        except requests.exceptions.RequestException as e:
+            body = getattr(getattr(e, "response", None), "text", "N/A")
+            print(f"  [ERROR] Webexメッセージ送信失敗: {e} / レスポンス: {body}")
+            break
+    SEND_RESULTS["ng"] += 1
+    return False
 
 
 def build_and_send(
@@ -2073,7 +2112,7 @@ def send_digest(
 
 def main() -> None:
     category_keywords = load_categories()
-    channels = load_bots()
+    channels = load_channels()
     multi_mode = len(channels) > 0
 
     parser = argparse.ArgumentParser(
@@ -2123,7 +2162,7 @@ def main() -> None:
     if args.categories_file != CATEGORIES_FILE:
         category_keywords = load_categories(args.categories_file)
     if args.channels_file != CHANNELS_FILE:
-        channels = load_bots(args.channels_file)
+        channels = load_channels(args.channels_file)
         multi_mode = len(channels) > 0
 
     # categories を省略したチャンネルは、name を categories.yml のカテゴリ名として解決する。
@@ -2571,6 +2610,20 @@ def main() -> None:
         )
 
     print("\n=== 完了 / Done ===")
+    sys.exit(delivery_exit_code())
+
+
+def delivery_exit_code() -> int:
+    """配信結果を終了コードにする。
+
+    0 = 送信失敗なし / 1 = 一部失敗（送れた分があるので再試行しない）
+    2 = 1件も送れなかった（回線断などの一時障害とみなし、ラッパーが再試行する）
+    """
+    ok, ng = SEND_RESULTS["ok"], SEND_RESULTS["ng"]
+    if not ng:
+        return 0
+    print(f"  [結果] 送信成功 {ok} 件 / 送信失敗 {ng} 件")
+    return 1 if ok else 2
 
 
 if __name__ == "__main__":

@@ -27,3 +27,15 @@ weather:
   # 天気予報APIの既定値。ウィザードが urls.yml の weather.api_url に書き込む。
   # 実際に予報を取りに行く先は urls.yml 側の値なので、変更はそちらで行う。
   forecast_default: https://api.open-meteo.com/v1/forecast
+
+healthcheck:
+  # 配信前の疎通確認先。DNS が引けて、期待した HTTP 応答が返ることを確かめる。
+  # 無線が切れている・スリープ復帰直後で DNS が返らない状態のまま配信すると、
+  # フィードは取れても投稿先の名前解決に失敗し、全チャンネルが空振りするため。
+  # ここに挙げた URL が**すべて**通ったときだけ配信する。
+  timeout: 10
+  urls:
+  - url: https://www.cisco.com        # 一般的なインターネット疎通
+    expect: [200]
+  - url: https://webexapis.com/v1/ping  # 実際の投稿先（認証なしでも 200 が返る）
+    expect: [200]

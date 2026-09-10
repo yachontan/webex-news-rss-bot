@@ -297,15 +297,14 @@ def step_dry_run() -> None:
     print(f"\n  {'✅ 正常に完了しました' if ok else '❌ 失敗しました。上の出力を確認してください'}")
 
 
-def step_schedule() -> None:
-    """ステップ7: 毎朝の自動実行を登録する（UI 版と同じ仕組みを使う）。"""
-    print(f"\n{RULE}\nステップ 7 / 毎朝の自動実行を設定します\n{RULE}")
+def _print_environment() -> bool:
+    """この OS と置き場所で自動実行を登録できるかを示す。登録できなければ False。"""
     info = core.scheduler_info()
     print(f"  いま動かしているのは {core.os_label()} です。")
     if not info.supported:
         print(f"  ❌ {core.os_label()} 向けの登録機能はありません。")
         print(f"     {info.note}")
-        return
+        return False
     print(f"     使う仕組み : {info.mechanism}")
     print(f"     登録先     : {info.where}")
     print(f"     呼ばれる物 : {info.runner}")
@@ -314,11 +313,21 @@ def step_schedule() -> None:
 
     # 置き場所が TCC 保護下だと、登録できても定時実行だけが静かに失敗する
     location = core.check_location()
-    if not location.ok:
-        print("  ❌ この置き場所では自動実行を設定できません。")
-        print(f"     {location.detail}")
-        print(f"     {location.hint}")
-        print("     ※ 手動実行は動くため、登録しても気づきにくい失敗になります。")
+    if location.ok:
+        return True
+    print("  ❌ この置き場所では自動実行を設定できません。")
+    print(f"     {location.detail}")
+    print(f"     {location.hint}")
+    print("     ※ 手動実行は動くため、登録しても気づきにくい失敗になります。")
+    return False
+
+
+def step_schedule() -> None:
+    """ステップ7: 毎朝の自動実行を登録する（UI 版と同じ仕組みを使う）。"""
+    print(f"\n{RULE}\nステップ 7 / 毎朝の自動実行を設定します\n{RULE}")
+    print("  時刻はすべて日本時間（JST）で指定します。")
+    print("  （見出しの日付も記事の時刻も、本体が日本時間で処理しているため）")
+    if not _print_environment():
         return
     registered, detail = core.schedule_status()
     print(f"  現在: {detail}")
@@ -326,7 +335,7 @@ def step_schedule() -> None:
         print("  設定しませんでした。あとから「自動実行」タブでも設定できます。")
         return
 
-    text = _ask("  何時に実行しますか（HH:MM）", default="09:01")
+    text = _ask("  何時に実行しますか（日本時間 HH:MM）", default="09:01")
     try:
         hour, minute = (int(x) for x in text.split(":", 1))
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
@@ -346,6 +355,9 @@ def step_schedule() -> None:
         weekdays = [0, 1, 2, 3, 4]
 
     print(f"  {core.describe_schedule(hour, minute, weekdays)}")
+    local = core.describe_local_schedule(hour, minute, weekdays)
+    if local:
+        print(f"  {local}")
     if not _ask_yes("  この内容で登録しますか？"):
         print("  中止しました。")
         return
@@ -353,6 +365,10 @@ def step_schedule() -> None:
     print(f"  {'✅ 登録しました' if ok else '❌ 登録できませんでした'}: {message}")
     if ok:
         print("  ※ パソコンがスリープしていると実行されません。詳しくは README の「自動実行」を参照。")
+        wake = core.wake_command(hour, minute, weekdays)
+        if wake:
+            print("  ※ スリープからの自動起床を設定するなら、ターミナルで次を実行:")
+            print(f"      {wake}")
 
 
 def parse_args() -> argparse.Namespace:

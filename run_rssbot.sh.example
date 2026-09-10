@@ -22,32 +22,95 @@ ERR_FILE="$LOG_DIR/launchd_err-${TIMESTAMP}.log"
 mkdir -p "$LOG_DIR"
 cd "$TARGET_DIR"
 
-# --- ネットワーク/DNS 準備待ち / Wait for network readiness ---
-# スリープ復帰直後などにネットワーク/DNS が未準備のまま launchd が発火すると、
-# 大量のフィード取得が DNS 解決失敗し、収集が異常遅延・ハングする。
-# 投稿先(webexapis.com)へ疎通できるまで最大5分待ってから本体を起動する。
-# curl は HTTP 応答が返れば(4xx/5xx でも)成功扱い＝DNS+TCP+TLS の疎通確認になる。
-NET_CHECK_HOST="https://webexapis.com"
-MAX_WAIT=300      # 最大待機秒数（5分）
-INTERVAL=10       # 再試行間隔（秒）
+# --- 日本時間ゲート / Japan-time gate ---
+# 配信内容（見出しの日付、記事の JST 表記、月曜だけ週末分をまとめる判定）はすべて
+# 日本時間が基準。ところが launchd は「端末のローカル時刻」でしか予約できないため、
+# 時差のある土地では JST の同じ時刻に当たるローカル時刻が夏時間で年に2通りになる。
+# ウィザードは両方を予約するので、本当に配信すべき回かどうかをここで判定する。
+#   第1引数: 配信する時刻（日本時間の「時」。既定 9）
+#   第2引数: 配信する曜日（日本時間で 1=月 … 7=日 を並べた文字列。既定 12345）
+TARGET_HOUR="${1:-9}"
+TARGET_DAYS="${2:-12345}"
+STAMP="$LOG_DIR/.last_run_jst"      # その日はもう配信したという印
+FORCE_FLAG="$LOG_DIR/.force_run"    # 「いますぐ1回実行」が置く、1回だけの通行証
+GATE_LOG="$LOG_DIR/gate.log"
+
+JST_DATE=$(TZ=Asia/Tokyo date +%Y-%m-%d)
+JST_DAY=$(TZ=Asia/Tokyo date +%u)
+JST_HOUR=$(TZ=Asia/Tokyo date +%H)
+
+gate_skip() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') skip: $1（日本時間 ${JST_DATE} ${JST_HOUR}時）" >> "$GATE_LOG"
+    # 毎時起きるので、記録が際限なく伸びないよう末尾だけ残す
+    if [ "$(wc -l < "$GATE_LOG")" -gt 400 ]; then
+        tail -n 200 "$GATE_LOG" > "$GATE_LOG.tmp" && mv "$GATE_LOG.tmp" "$GATE_LOG"
+    fi
+    exit 0
+}
+
+if [ -f "$FORCE_FLAG" ]; then
+    rm -f "$FORCE_FLAG"
+    FORCED="1"      # 「いますぐ1回実行」。判定を飛ばし、回線が怪しくても実行して結果を見せる
+else
+    case "$TARGET_DAYS" in
+        *"$JST_DAY"*) ;;
+        *) gate_skip "日本時間では配信しない曜日" ;;
+    esac
+    if [ "$((10#$JST_HOUR))" -lt "$((10#$TARGET_HOUR))" ]; then
+        gate_skip "日本時間ではまだ配信時刻の前"
+    fi
+    if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$JST_DATE" ]; then
+        gate_skip "この日はすでに配信済み"
+    fi
+    FORCED=""
+fi
+# 「配信済み」の記録は、実際に送れてから書く（下）。ここで書いてしまうと、
+# 回線断で全滅した回でもその日が終わったことになり、再試行されなくなる。
+
+# --- 配信前のネットワーク疎通確認 / Pre-flight connectivity check ---
+# 無線が切れている・スリープ復帰直後で DNS が返らない状態のまま走らせると、
+# フィードは取れても投稿先や要約APIの名前解決に失敗し、全チャンネルが空振りする。
+# そこで check_network.py で「DNS が引けるか＋期待した HTTP 応答か」を先に確かめる。
+# 確認先の URL は urls.yml の healthcheck: に置いてある（コードに直書きしない）。
+# 短く待って駄目なら配信を見送る。記録を残さないので、次の30分後の起動でやり直される。
+MAX_WAIT=120      # この実行の中で待つ上限（秒）
+INTERVAL=15       # 再確認の間隔（秒）
+NET_OK=""
 waited=0
-while [ "$waited" -lt "$MAX_WAIT" ]; do
-    if curl -sS --head --max-time 8 "$NET_CHECK_HOST" >/dev/null 2>&1; then
-        echo "[run_rssbot] network ready after ${waited}s ($(date '+%Y-%m-%d %H:%M:%S'))" >> "$LOG_FILE"
+while :; do
+    if "$TARGET_DIR/bin/python" "$TARGET_DIR/check_network.py" >> "$LOG_FILE" 2>&1; then
+        NET_OK="1"
+        echo "[run_rssbot] 疎通確認OK（待ち ${waited}秒 / $(date '+%Y-%m-%d %H:%M:%S')）" >> "$LOG_FILE"
+        break
+    fi
+    if [ "$waited" -ge "$MAX_WAIT" ]; then
         break
     fi
     sleep "$INTERVAL"
     waited=$((waited + INTERVAL))
 done
-if [ "$waited" -ge "$MAX_WAIT" ]; then
-    echo "[run_rssbot] WARN: network not confirmed after ${MAX_WAIT}s; proceeding anyway ($(date '+%Y-%m-%d %H:%M:%S'))" >> "$LOG_FILE"
+
+if [ -z "$NET_OK" ] && [ -z "$FORCED" ]; then
+    echo "[run_rssbot] 疎通確認に失敗したため配信を見送りました（30分後にやり直します）" >> "$LOG_FILE"
+    gate_skip "ネットワークの疎通確認に失敗（30分後に再試行）"
 fi
 
-# Python の実行パス / Python interpreter:
-#   リポジトリ直下に venv を作った場合（python3 -m venv .）は "$TARGET_DIR/bin/python"。
-#   venv/ サブディレクトリに作った場合は "$TARGET_DIR/venv/bin/python" に書き換える。
-#
 # --weekend-catchup: 月曜の実行時のみ取得期間を72時間(金土日)に自動拡張する
 #   （平日9時運用のため、月曜は週末の未配信分をまとめて配信）。月曜以外は無効=24h。
 #   毎日実行する運用ならこのフラグは外してよい。
-"$TARGET_DIR/bin/python" "$TARGET_DIR/webex-news-rss-bot.py" --weekend-catchup >> "$LOG_FILE" 2>> "$ERR_FILE"
+# 実行中にスリープすると、復帰後に名前解決が壊れて全チャンネル失敗することがある。
+# macOS では caffeinate で寝かせないようにする（無い環境ではそのまま実行）。
+KEEP_AWAKE=""
+command -v caffeinate >/dev/null 2>&1 && KEEP_AWAKE="caffeinate -i -m -s"
+
+$KEEP_AWAKE "$TARGET_DIR/bin/python" "$TARGET_DIR/webex-news-rss-bot.py" --weekend-catchup \
+    >> "$LOG_FILE" 2>> "$ERR_FILE"
+status=$?
+
+# 終了コード 2 = 1件も送れなかった（一時的な障害）。記録を残さず、次の毎時チェックに任せる。
+if [ "$status" -eq 2 ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') retry: 1件も送信できなかったため再試行します（日本時間 ${JST_DATE}）" >> "$GATE_LOG"
+    exit 0
+fi
+echo "$JST_DATE" > "$STAMP"
+exit "$status"

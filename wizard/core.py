@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 
@@ -1597,6 +1597,22 @@ SCHEDULE_TASK_NAME = "rss-bot daily"          # Windows のタスク名
 WEEKDAY_LABELS = ["月", "火", "水", "木", "金", "土", "日"]
 _MAC_WEEKDAY = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 0}   # 月=1 … 日=0
 _WIN_WEEKDAY = {0: "MON", 1: "TUE", 2: "WED", 3: "THU", 4: "FRI", 5: "SAT", 6: "SUN"}
+_PMSET_WEEKDAY = {0: "M", 1: "T", 2: "W", 3: "R", 4: "F", 5: "S", 6: "U"}
+
+# 配信時刻は**つねに日本時間**で指定する。投稿の見出しの日付、記事に付く「JST」表記、
+# 月曜だけ週末分をまとめる判定は、すべて本体側が JST で処理している。
+#
+# ところが OS のスケジューラは「ローカル時刻」でしか予約できないうえ、その「ローカル」が
+# 何を指すかは当てにならない。実測した例では、macOS の launchd がカレンダー計算に
+# Asia/Tokyo を使いながら、起動したプロセスには America/Los_Angeles を渡していた
+# （launchd は起動時のタイムゾーンを抱え込み、あとから変えても追随しないことがある）。
+# そのため「JST をローカル時刻へ換算して予約する」やり方は当てにならない。
+#
+# そこで予約は**30分ごと**に固定し、配信するかどうかは実行時に run_rssbot 側が
+# 日本時間を見て決める。こうすると端末のタイムゾーンにも夏時間にも一切依存しない。
+# 30分刻みにしてあるのは、回線が繋がっていなくて見送った回を30分後にやり直すため。
+JST = timezone(timedelta(hours=9))
+FORCE_FLAG = REPO_ROOT / "log" / ".force_run"
 
 OS_MACOS, OS_WINDOWS, OS_LINUX, OS_OTHER = "macos", "windows", "linux", "other"
 
@@ -1659,10 +1675,12 @@ def schtasks_create_command(hour: int, minute: int, weekdays: list[int]) -> list
     `/TR` に自分で引用符を付けない。subprocess がリスト要素を適切に引用するため、
     ここで `"..."` を足すと引用符ごと引数として渡ってしまう。
     """
-    days = ",".join(_WIN_WEEKDAY[d] for d in sorted(weekdays))
+    # ラッパーに引数を渡すため、`/TR` は「実行ファイル＋引数」の1つの文字列になる。
+    # 実行ファイル側だけは自分で引用符を付ける（パスに空白があっても切れないように）。
+    task = f'"{runner_path()}" ' + " ".join(_runner_args(hour, weekdays))
     return ["schtasks", "/Create", "/TN", SCHEDULE_TASK_NAME,
-            "/TR", str(runner_path()), "/SC", "WEEKLY",
-            "/D", days, "/ST", f"{hour:02d}:{minute:02d}", "/F"]
+            "/TR", task, "/SC", "MINUTE", "/MO", "30",
+            "/ST", f"00:{minute:02d}", "/F"]
 
 
 def _plist_path() -> Path:
@@ -1673,6 +1691,11 @@ def _plist_path() -> Path:
 def runner_path() -> Path:
     """定時実行から呼ぶラッパーのパス（OS ごとに違う）。"""
     return REPO_ROOT / scheduler_info().runner
+
+
+def _runner_args(hour: int, weekdays: list[int]) -> list[str]:
+    """ラッパーに渡す日本時間のゲート条件（配信する時・配信する曜日）。"""
+    return [str(hour), "".join(str(d + 1) for d in sorted(weekdays))]
 
 
 def ensure_runner() -> tuple[bool, str]:
@@ -1694,12 +1717,18 @@ def ensure_runner() -> tuple[bool, str]:
 
 
 def build_plist(hour: int, minute: int, weekdays: list[int]) -> str:
-    """launchd 用の plist を組み立てる。"""
-    entries = "\n".join(
-        f"        <dict><key>Weekday</key><integer>{_MAC_WEEKDAY[d]}</integer>"
-        f"<key>Hour</key><integer>{hour}</integer>"
-        f"<key>Minute</key><integer>{minute}</integer></dict>"
-        for d in sorted(weekdays))
+    """launchd 用の plist を組み立てる。
+
+    Hour を書かない StartCalendarInterval は「毎時その分」に発火する。それを30分ずらして
+    2つ並べ、30分ごとの起動にする。配信するかどうかは run_rssbot.sh が日本時間と
+    ネットワークの疎通で判断するので、ここでは時刻を絞らない。
+    """
+    slots = "\n".join(
+        f"        <dict><key>Minute</key><integer>{(minute + offset) % 60}</integer></dict>"
+        for offset in (0, 30))
+    arguments = "\n".join(
+        f"        <string>{value}</string>"
+        for value in ["/bin/bash", str(runner_path()), *_runner_args(hour, weekdays)])
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1707,14 +1736,17 @@ def build_plist(hour: int, minute: int, weekdays: list[int]) -> str:
 <dict>
     <key>Label</key>
     <string>{SCHEDULE_LABEL}</string>
+    <!-- 引数は日本時間のゲート条件（配信する時 / 配信する曜日 1=月…7=日）。
+         実際に配信するのは、日本時間で {hour:02d}:{minute:02d} 以降の最初の1回だけ。 -->
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>{runner_path()}</string>
+{arguments}
     </array>
+    <!-- 30分ごとに様子を見にいく。端末のタイムゾーンが何であっても、日本時間で
+         正しい回だけが配信される。回線が繋がっていなくて見送った回は30分後にやり直す。 -->
     <key>StartCalendarInterval</key>
     <array>
-{entries}
+{slots}
     </array>
     <key>WorkingDirectory</key>
     <string>{REPO_ROOT}</string>
@@ -1738,7 +1770,7 @@ def _run(command: list[str]) -> tuple[bool, str]:
 
 
 def install_schedule(hour: int, minute: int, weekdays: list[int]) -> tuple[bool, str]:
-    """毎朝の自動実行を登録する（macOS: launchd / Windows: タスクスケジューラ）。"""
+    """毎朝の自動実行を登録する。時刻は**日本時間**で指定する。"""
     if not weekdays:
         return False, "実行する曜日を1つ以上選んでください"
     ok, message = ensure_runner()
@@ -1792,23 +1824,32 @@ def schedule_status() -> tuple[bool, str]:
     path = _plist_path()
     if not path.exists():
         return False, "登録されていません"
-    ok, output = _run(["launchctl", "list", SCHEDULE_LABEL])
+    ok, _ = _run(["launchctl", "list", SCHEDULE_LABEL])
     if ok:
         return True, f"登録済みです（{path.name}）"
     return False, f"plist はありますが、読み込まれていません（{path}）"
 
 
 def run_schedule_now() -> tuple[bool, str]:
-    """登録した処理をいますぐ1回実行する（動作確認用）。"""
+    """登録した処理をいますぐ1回実行する（動作確認用）。
+
+    日本時間ゲートを1回だけ素通りさせる印を置いてから、スケジューラ経由で起動する。
+    こうすると、実際の定時実行とまったく同じ経路で動作を確認できる。
+    """
     if not scheduler_info().supported:
         return False, f"{os_label()} には登録の仕組みがありません"
+    try:
+        FORCE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+        FORCE_FLAG.write_text("1", encoding="utf-8")
+    except OSError as exc:
+        return False, f"実行の印を置けません: {exc}"
     if current_os() == OS_WINDOWS:
         return _run(["schtasks", "/Run", "/TN", SCHEDULE_TASK_NAME])
     return _run(["launchctl", "start", SCHEDULE_LABEL])
 
 
 def describe_schedule(hour: int, minute: int, weekdays: list[int]) -> str:
-    """設定内容を日本語1行で説明する。"""
+    """設定内容を日本語1行で説明する（時刻は日本時間）。"""
     if not weekdays:
         return "曜日が選ばれていません"
     if sorted(weekdays) == [0, 1, 2, 3, 4]:
@@ -1817,7 +1858,41 @@ def describe_schedule(hour: int, minute: int, weekdays: list[int]) -> str:
         days = "毎日"
     else:
         days = "・".join(WEEKDAY_LABELS[d] for d in sorted(weekdays))
-    return f"{days} の {hour:02d}:{minute:02d} に実行します"
+    return f"{days} の {hour:02d}:{minute:02d}（日本時間）に実行します"
+
+
+def describe_local_schedule(hour: int, minute: int, weekdays: list[int]) -> str:
+    """予約の仕組みを1行で説明する。"""
+    if not weekdays:
+        return ""
+    return (f"予約そのものは30分ごとに入りますが、実際に配信するのは日本時間で "
+            f"{hour:02d}:{minute:02d} を過ぎた最初の1回だけです。"
+            "配信の前にネットワークの疎通を確かめ、繋がっていなければ見送って"
+            "30分後にやり直します。")
+
+
+def _local_of_jst(hour: int, minute: int, weekday: int) -> datetime:
+    """日本時間の「その曜日の hour:minute」を、この端末のローカル時刻で返す。"""
+    base = datetime.now(JST).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    for offset in range(8):
+        moment = base + timedelta(days=offset)
+        if moment.weekday() == weekday:
+            return moment.astimezone()
+    return base.astimezone()
+
+
+def wake_command(hour: int, minute: int, weekdays: list[int], lead: int = 66) -> str:
+    """スリープからの自動起床を設定する pmset コマンド（macOS 用・要 sudo）。
+
+    pmset は端末のローカル時刻で動くため、日本時間の配信時刻をローカルへ直して指定する。
+    夏時間で1時間ずれても間に合うよう、既定では1時間強だけ前倒しして起こす。
+    """
+    if not weekdays:
+        return ""
+    moments = [_local_of_jst(hour, minute, d) - timedelta(minutes=lead) for d in sorted(weekdays)]
+    earliest = min(m.hour * 60 + m.minute for m in moments)
+    days = "".join(_PMSET_WEEKDAY[m.weekday()] for m in moments)
+    return f"sudo pmset repeat wakeorpoweron {days} {earliest // 60:02d}:{earliest % 60:02d}:00"
 
 
 # ===========================================================

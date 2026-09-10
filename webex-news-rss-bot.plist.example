@@ -27,6 +27,17 @@
       （ターミナルからの手動実行は成功するので、定時実行だけ動かない形で表面化する）
     - 実行ログはラッパー側で log/launchd_run-YYYYMMDD-HHMMSS.log に出力される。
       ここで指定する StandardOutPath/StandardErrorPath は launchd 自身のエラー用。
+
+  時刻の扱い / About the time:
+    rss-bot の配信内容（見出しの日付、記事の JST 表記、月曜だけ週末分をまとめる判定）は
+    すべて日本時間が基準。一方 launchd はローカル時刻でしか予約できず、しかもその
+    「ローカル」が何を指すかは当てにならない（launchd は起動時のタイムゾーンを抱え込む。
+    実測では、カレンダー計算に Asia/Tokyo を使いながら、起動したプロセスには
+    America/Los_Angeles を渡していた例があった）。
+    そこで予約は「毎時 1 分」に固定し、配信するかどうかは run_rssbot.sh が日本時間を
+    見て決める。下の <string>9</string> が配信する時、<string>12345</string> が配信する
+    曜日（1=月 … 7=日）で、日本時間で 9:01 を過ぎた最初の1回だけが実際に配信される。
+    それ以外の回は何もせず即座に終了し、理由が log/gate.log に残る。
   ============================================================
 -->
 <plist version="1.0">
@@ -38,19 +49,21 @@
     <array>
         <string>/bin/bash</string>
         <string>__REPO_DIR__/run_rssbot.sh</string>
+        <!-- 日本時間のゲート条件: 配信する「時」/ 配信する曜日（1=月 … 7=日）。
+             ローカル時刻での予約が日本時間の何時に当たるかを実行時に確かめ、
+             ずれた回は配信せずに log/gate.log へ理由だけ残す。 -->
+        <string>9</string>
+        <string>12345</string>
     </array>
 
-    <!-- 平日（月〜金）9:01 に実行 / Weekdays at 09:01.
-         毎日実行したい場合は、この array を
-         <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
-         の1要素に置き換え、run_rssbot.sh の --weekend-catchup を外す。 -->
+    <!-- Hour を書かないと「毎時その分」に発火する。30分ずらして2つ並べ、30分ごとにする。
+         繋がっていなくて見送った回を30分後にやり直すため。曜日と時刻の判断は上の引数に任せる。
+         毎日配信にしたい場合は引数の 12345 を 1234567 にし、run_rssbot.sh の
+         [weekend-catchup] オプションを外す。 -->
     <key>StartCalendarInterval</key>
     <array>
-        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
-        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
-        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
-        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
-        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>1</integer></dict>
+        <dict><key>Minute</key><integer>1</integer></dict>
+        <dict><key>Minute</key><integer>31</integer></dict>
     </array>
 
     <key>WorkingDirectory</key>
