@@ -5,7 +5,7 @@
 投稿先や要約APIの名前解決に失敗し、全チャンネルが空振りする（実際に発生）。
 そこで配信の前に、DNS が引けて期待どおりの HTTP 応答が返ることを確かめる。
 
-確認先の URL はこのコードに直書きせず、urls.yml の `healthcheck:` に置く。
+確認先の URL はこのコードに直書きせず、endpoints.yml の `healthcheck:` に置く。
 
 実行 / Run:
     ./bin/python check_network.py           # 1回だけ確認する
@@ -25,33 +25,24 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-URLS_FILE = REPO_ROOT / "urls.yml"
+sys.path.insert(0, str(REPO_ROOT))
 
 DEFAULT_TIMEOUT = 10
 
 
-def load_targets(path: Path = URLS_FILE) -> tuple[list[dict], int]:
-    """urls.yml の healthcheck: から確認先と待ち時間を読む。
+def load_targets() -> tuple[list[dict], int]:
+    """endpoints.yml の healthcheck: から確認先と待ち時間を読む。
 
-    確認先が書かれていなければ空を返す。呼び出し側はそれを「確認できることが無い」
+    確認先が書かれていなければ空を返す。呼び出し側はそれを「確かめることが無い」
     とみなして通す。設定漏れで配信そのものが止まってしまうのを避けるため。
     """
-    import yaml
+    from endpoints import load_endpoints
 
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        print(f"  [WARN] urls.yml を読めません: {exc}")
+    block = (load_endpoints() or {}).get("healthcheck") or {}
+    targets = [t for t in (block.get("urls") or []) if t]
+    if not targets:
         return [], DEFAULT_TIMEOUT
-
-    feeds = data.get("feeds") if isinstance(data, dict) else data
-    for item in feeds or []:
-        if isinstance(item, dict) and item.get("healthcheck"):
-            block = item["healthcheck"] or {}
-            targets = [t for t in (block.get("urls") or []) if t]
-            if targets:
-                return targets, int(block.get("timeout") or DEFAULT_TIMEOUT)
-    return [], DEFAULT_TIMEOUT
+    return targets, int(block.get("timeout") or DEFAULT_TIMEOUT)
 
 
 def _host_of(url: str) -> str:
@@ -113,8 +104,7 @@ def main() -> int:
     targets, timeout = load_targets()
     if not targets:
         if not args.quiet:
-            print("  [疎通確認] urls.yml に healthcheck: がないため確認を省略します。"
-                  "（urls.yml.example を参考に追記すると、配信前に疎通を確かめます）")
+            print("  [疎通確認] endpoints.yml に healthcheck: がないため確認を省略します。")
         return 0
 
     failures = []

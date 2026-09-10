@@ -13,8 +13,15 @@
 #   1. 文字列                       : 通常のフィードURL
 #   2. {group: <名前>, urls: [...]} : 名前付きグループ（channels の source_groups から参照）
 #   3. {weather: {...}}             : 天気API設定（RSSではないので収集対象から除外される）
+#   4. {cisco_advisory: {...}}      : CVSS取得API設定（同上）
 # ============================================================
 feeds:
+
+  # ── Cisco Security Advisory の CVSS 取得API（任意）/ CVSS lookup (optional) ──
+  #   Cisco の advisory 記事に CVSS バッジ（🔴 CVSS 9.1 など）を付けるために使う。
+  #   {adv_id} が Advisory ID に置き換わる。このブロックが無い場合はバッジを付けない。
+  - cisco_advisory:
+      cvrf_url: https://sec.cloudapps.cisco.com/security/center/contentxml/CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
 
   # ── 天気API（任意）/ Weather API (optional) ──
   #   デイリーダイジェスト（channels の digest: true）で使う。Open-Meteo は APIキー不要。
@@ -62,16 +69,3 @@ feeds:
   # RSS が無いサイトは Google News 検索フィードで代替できる
   # Sites without RSS can be covered via Google News search feeds:
   # - https://news.google.com/rss/search?q=Anthropic&hl=ja&gl=JP&ceid=JP:ja
-
-  # 配信前のネットワーク疎通確認 / Pre-flight connectivity check
-  # 無線が切れている・DNS が返らない状態で配信すると全チャンネル空振りするため、
-  # 走らせる前にここへ書いた URL を確かめる（DNS が引けるか＋期待した HTTP 応答か）。
-  # 1つでも到達できなければ配信を見送り、30分後の再試行に任せる。
-  # このエントリは urls / group キーを持たないため、RSS 収集からは無視される。
-  - healthcheck:
-      timeout: 10
-      urls:
-      - url: https://www.cisco.com
-        expect: [200]
-      - url: https://webexapis.com/v1/ping
-        expect: [200]

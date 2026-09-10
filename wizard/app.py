@@ -90,8 +90,12 @@ def _render_bot_creation_guide() -> None:
             "追加されていないスペースは、次のステップの一覧に出てきません。", icon=":material/info:")
 
 
-def render_bot() -> str:
-    """ステップ1: chat bot を用意する。使うトークンを返す（未確定なら空文字）。"""
+def render_bot() -> tuple[str, str]:
+    """ステップ1: chat bot を用意する。
+
+    戻り値は (トークン, `.env` の変数名)。変数名は、そのトークンが無効だったときに
+    「どの変数を貼り直せばよいか」を次のステップへ伝えるために返す。
+    """
     st.header("ステップ 1 ｜ chat bot の用意")
     known = core.detect_env_tokens()
 
@@ -106,24 +110,29 @@ def render_bot() -> str:
         st.caption("まだ bot のトークンが設定されていません。新しく作りましょう。")
         choice = "新しく bot を作る"
 
-    token = ""
+    token, token_var = "", ""
     with st.container(border=True):
         if choice == "設定済みの bot を使う":
             st.caption("`.env` にあるトークンを検出しました。変数名だけを表示し、値は画面に出しません。")
-            name = st.selectbox("使うトークン", known, key="known_token")
-            token = core.get_env_token(name)
-            st.caption(f"`{name}` を使用します。")
+            token_var = st.selectbox("使うトークン", known, key="known_token")
+            token = core.get_env_token(token_var)
+            st.caption(f"`{token_var}` を使用します。")
         else:
             _render_bot_creation_guide()
             token = st.text_input("作成した bot のアクセストークン", type="password",
                                   key="new_token",
                                   help="入力値は画面にもログにも残りません。").strip()
-    return token
+    return token, token_var
 
 
-def render_token(token: str) -> str:
-    """ステップ2: トークンを検証してスペース一覧を取得する。"""
+def render_token(token: str, token_var: str = "") -> str:
+    """ステップ2: トークンを検証してスペース一覧を取得する。
+
+    無効だった場合は、その場で新しいトークンを貼り直せるようにする
+    （`.env` から選んだトークンのときだけ。手入力の場合は上の欄を直せばよい）。
+    """
     st.header("ステップ 2 ｜ bot の確認")
+    _render_repair_notice()
     if not token:
         st.info("上でトークンを選ぶか貼り付けると、続きの手順が表示されます。")
         return ""
@@ -131,7 +140,12 @@ def render_token(token: str) -> str:
         with st.spinner("Webex に接続して確認しています..."):
             ok, message = core.validate_token(token)
         if not ok:
-            st.error(message)
+            st.error(f"{message}（`{token_var}`）" if token_var else message)
+            if token_var:
+                _render_regenerate_guide()
+                _render_token_form(token_var, key_prefix="setup_repair")
+            else:
+                st.caption("貼り付けたトークンが正しいか、ステップ1の欄で確認してください。")
             return ""
         st.session_state["validated_token"] = token
         st.session_state["spaces"] = core.list_spaces(token)
@@ -145,11 +159,9 @@ def render_token(token: str) -> str:
                 + "、".join(f"`{name}`" for name in created)
                 + "\n\nこのあとの手順で中身を埋めていきます。", icon=":material/note_add:")
     if not spaces:
-        st.warning("この bot が参加しているスペースがありません。"
-                   "Webex で bot をスペースに追加してから、ページを再読み込みしてください。",
-                   icon=":material/warning:")
-    else:
-        st.caption("スペースの詳しい情報や Room ID は「bot とスペース」タブで確認できます。")
+        _render_no_space_help(token)
+        return ""
+    st.caption("スペースの詳しい情報や Room ID は「bot とスペース」タブで確認できます。")
     return token
 
 
@@ -185,9 +197,13 @@ def _channel_options_of(channel: dict) -> dict:
             "source_groups": [str(x) for x in (channel.get("source_groups") or [])]}
 
 
-def render_channels(categories: list[str],
-                    existing: core.ExistingConfig | None) -> list[core.ChannelPlan]:
-    """ステップ3: 配信するチャンネルを1件ずつ編集し、必要なら追加する。"""
+def render_channels(categories: list[str], existing: core.ExistingConfig | None
+                    ) -> tuple[list[core.ChannelPlan], set[str]]:
+    """ステップ3: 配信するチャンネルを1件ずつ編集し、必要なら追加する。
+
+    戻り値は (書き出すチャンネル, 削除が選ばれたチャンネル名)。削除は plans に
+    現れないため、名前を別に返さないと「編集しなかった」と区別が付かない。
+    """
     st.header("ステップ 3 ｜ 配信するチャンネル")
     spaces = st.session_state.get("spaces", [])
     visible = {s.get("id", ""): (s.get("title") or "(名前なし)") for s in spaces}
@@ -198,13 +214,15 @@ def render_channels(categories: list[str],
     all_names = [str(c.get("name") or "") for c in (existing.all_channels if existing else [])]
 
     plans: list[core.ChannelPlan] = []
+    removed_names: set[str] = set()
     if editable:
         st.subheader(f"いまの設定（{len(editable)} 件）")
         for channel in editable:
             name = str(channel.get("name") or "")
             space_id = core._expand_env(channel.get("webex_space_id"))
+            widget_key = _widget_key(space_id, name)
             plan = _render_channel_card(
-                key=_widget_key(space_id, name), name=name, space_id=space_id,
+                key=widget_key, name=name, space_id=space_id,
                 space_label=visible.get(space_id, ""), categories=categories,
                 current_cats=list(channel.get("categories") or [name]),
                 options=_channel_options_of(channel),
@@ -214,6 +232,11 @@ def render_channels(categories: list[str],
                 space_ref=str(channel.get("webex_space_id") or ""))
             if plan:
                 plans.append(plan)
+            elif st.session_state.get(f"del_{widget_key}"):
+                # 「削除」にチェックされた場合だけ、消す対象として控える。
+                # 名前が空・カテゴリ未選択でも card は None を返すため、
+                # チェックの有無で「削除」と「入力途中」を区別する。
+                removed_names.add(name)
     else:
         st.caption("この bot で編集できる既存チャンネルはありません。下から追加できます。")
 
@@ -226,7 +249,7 @@ def render_channels(categories: list[str],
         names = "、".join(str(c.get("name")) for c in locked)
         st.caption(f":material/lock: 次の {len(locked)} 件はこの画面では変更しません"
                    f"（そのまま残します）: {names}")
-    return plans
+    return plans, removed_names
 
 
 def _render_new_channel(categories: list[str], visible: dict[str, str],
@@ -310,6 +333,24 @@ def _render_channel_options(key: str, options: dict, other_names: list[str], kin
             default=[n for n in options.get("defers_to", []) if n in other_names],
             key=f"defer_{key}", disabled=kind == KIND_DIGEST,
             help="ここで選んだチャンネルにも該当する記事は、そちら側だけに配信します。")
+        current_max = options.get("max_items")
+        max_text = st.text_input(
+            "1回に投稿する記事数の上限（max_items）",
+            value="" if current_max is None else str(current_max),
+            key=f"maxitems_{key}", disabled=kind == KIND_DIGEST,
+            placeholder=f"空欄なら {core.MAX_ITEMS_DEFAULT} 件",
+            help=f"これを超えた分は AI が重要そうな順に絞ります（1〜{core.MAX_ITEMS_LIMIT}）。"
+                 "多くすると1通が長くなります。")
+        max_items = None
+        if max_text.strip():
+            if (max_text.strip().isdigit()
+                    and 1 <= int(max_text.strip()) <= core.MAX_ITEMS_LIMIT):
+                max_items = int(max_text.strip())
+            else:
+                st.warning(f"記事数の上限は 1〜{core.MAX_ITEMS_LIMIT} の数字で入力してください"
+                           f"（空欄なら {core.MAX_ITEMS_DEFAULT} 件）。",
+                           icon=":material/warning:")
+
         current_min = options.get("min_japanese")
         min_text = st.text_input(
             "日本語記事の下限（min_japanese）",
@@ -323,7 +364,39 @@ def _render_channel_options(key: str, options: dict, other_names: list[str], kin
             else:
                 st.warning("日本語記事の下限は数字で入力してください（空欄なら指定なし）。",
                            icon=":material/warning:")
-    return {"priority": priority, "defers_to": defers, "min_japanese": min_japanese}
+    return {"priority": priority, "defers_to": defers, "min_japanese": min_japanese,
+            "max_items": max_items}
+
+
+def _render_digest_options(key: str, options: dict) -> dict:
+    """ダイジェストに載せる枠と、天気の見せ方を選ぶ。"""
+    st.markdown("**ダイジェストに載せるもの**")
+    st.caption("チェックした順ではなく、下に並んでいる順で投稿されます。")
+    current = options.get("digest_blocks")
+    if current is None:
+        current = list(core.DEFAULT_DIGEST_BLOCKS)
+    chosen = []
+    for name, label in core.DIGEST_BLOCKS.items():
+        if st.checkbox(label, value=name in current, key=f"blk_{key}_{name}"):
+            chosen.append(name)
+    if not chosen:
+        st.warning("1つも選ばれていません。このままだと日付の見出しだけが投稿されます。",
+                   icon=":material/warning:")
+
+    style_keys = list(core.WEATHER_STYLES)
+    current_style = (options.get("weather_format") or "table").lower()
+    if current_style not in style_keys:
+        current_style = "table"
+    style = st.radio(
+        "天気の見せ方", style_keys,
+        index=style_keys.index(current_style),
+        format_func=lambda k: core.WEATHER_STYLES[k],
+        key=f"wfmt_{key}", horizontal=True,
+        disabled="weather" not in chosen,
+        help="表形式は地点を見比べやすく、箇条書きはスマホで折り返して読めます。")
+    st.caption("Webex は Markdown の表に対応していないため、表形式は等幅のコードブロックで描きます。"
+               "地点や列が多いとスマホでは横スクロールになります。")
+    return {"digest_blocks": chosen, "weather_format": style}
 
 
 def _render_channel_card(key: str, name: str, space_id: str, space_label: str,
@@ -357,6 +430,10 @@ def _render_channel_card(key: str, name: str, space_id: str, space_label: str,
                                     default=current_kind, key=f"kind_{key}") or KIND_NEWS
         chosen, groups = _render_target_picker(key, new_name, categories, current_cats,
                                                options.get("source_groups", []), kind)
+        if kind == KIND_DIGEST:
+            st.caption(":material/tune: **載せる枠（天気／各チャンネルのまとめ／時事）と"
+                       "天気の見せ方は「ダイジェスト」タブ**で選びます。"
+                       "ここで保存しても、その設定はそのまま引き継がれます。")
         adv = _render_channel_options(key, options, other_names, kind)
 
     if not new_name.strip():
@@ -369,7 +446,12 @@ def _render_channel_card(key: str, name: str, space_id: str, space_label: str,
         name=new_name.strip(), categories=chosen, space_id=space_id, space_title=space_label,
         bot_token_ref=token_ref, space_ref=space_ref, is_digest=(kind == KIND_DIGEST),
         source_groups=groups,
-        defers_to=adv["defers_to"], min_japanese=adv["min_japanese"], priority=adv["priority"])
+        defers_to=adv["defers_to"], min_japanese=adv["min_japanese"], priority=adv["priority"],
+        # 枠の設定は「ダイジェスト」タブが持ち主。ここでは既存値をそのまま通す
+        # （通さないと、セットアップから保存したときに設定が消える）。
+        max_items=adv["max_items"],
+        digest_blocks=options.get("digest_blocks"),
+        weather_format=str(options.get("weather_format") or ""))
 
 
 def render_feeds(existing: core.ExistingConfig | None) -> list[str]:
@@ -429,16 +511,24 @@ def _prepare_variable_mode(token: str, plans: list[core.ChannelPlan],
 
 
 def render_write(token: str, plans: list[core.ChannelPlan], feeds: list[str],
-                 existing: core.ExistingConfig | None) -> None:
+                 existing: core.ExistingConfig | None,
+                 removed_names: set[str] | None = None) -> None:
     """ステップ5: 内容を見せてから書き込む。既存の高度な設定は引き継ぐ。"""
     st.header("ステップ 5 ｜ 設定ファイルの作成")
 
     use_var, env_values, cat_text, cat_notes = _prepare_variable_mode(token, plans, existing)
     urls_text = core.build_urls_text(
         feeds, special_feeds=existing.special_feeds if existing else None)
-    preserved = core.channels_to_preserve(existing, core.edited_channel_names(plans))
+    preserved = core.channels_to_preserve(existing, core.edited_channel_names(plans),
+                                          removed_names=removed_names)
     channels_text = core.build_channels_text(plans, kept_channels=preserved)
 
+    if removed_names:
+        st.warning(f"次の **{len(removed_names)} 件を設定から削除します**: "
+                   + "、".join(sorted(removed_names))
+                   + "\n\n配信は止まりますが、Webex のスペースと bot はそのまま残ります"
+                     "（消したい場合は Webex 側で操作してください）。",
+                   icon=":material/delete:")
     if preserved:
         names = "、".join(str(c.get("name")) for c in preserved)
         st.info(f"次の **{len(preserved)} 件は編集せずそのまま残します**: {names}\n\n"
@@ -603,20 +693,24 @@ def _render_weather_editor(others: list[dict]) -> dict | None:
     return entry
 
 
-def _pick_token(known: list[str]) -> tuple[str, str]:
-    """確認に使うトークンを選ぶ。戻り値は (トークン, 表示用ラベル)。"""
+def _pick_token(known: list[str]) -> tuple[str, str, str]:
+    """確認に使うトークンを選ぶ。戻り値は (トークン, 表示用ラベル, .env の変数名)。
+
+    変数名は、無効だったときにその場で貼り直せるようにするために返す
+    （手入力のトークンは `.env` の変数に紐づかないため空文字）。
+    """
     modes = ([TOKEN_FROM_ENV] if known else []) + [TOKEN_MANUAL]
     mode = st.segmented_control("トークンの指定", modes, default=modes[0],
                                 key="inspect_mode") or modes[0]
     if mode == TOKEN_FROM_ENV:
         name = st.selectbox("確認する bot のトークン", known, key="inspect_token",
                             help="変数名だけを表示し、値は画面に出しません。")
-        return core.get_env_token(name), f"`{name}`"
+        return core.get_env_token(name), f"`{name}`", name
     st.caption("`.env` にまだ無い bot のトークンでも確認できます。"
                "入力値は画面にもログにも残りません。")
     token = st.text_input("Bot トークンを貼り付け", type="password",
                           key="inspect_manual").strip()
-    return token, "入力したトークン"
+    return token, "入力したトークン", ""
 
 
 def _render_env_line_builder(rows: list[dict]) -> None:
@@ -691,7 +785,21 @@ def render_overview() -> None:
     _overview_warnings(existing)
 
     st.subheader("配信チャンネル")
-    st.dataframe(core.channel_summary(existing), width="stretch", hide_index=True)
+    st.caption("**チャンネル名は Webex 投稿の見出し**で、スペース名とは別物です。"
+               "下のボタンで、実際にどのスペースへ届くかを確かめられます。")
+    if st.button("投稿先スペース名を取得", key="fetch_titles"):
+        with st.spinner("Webex に問い合わせています..."):
+            st.session_state["space_titles"] = core.fetch_space_titles(existing)
+    titles = st.session_state.get("space_titles")
+    st.dataframe(core.channel_summary(existing, titles), width="stretch", hide_index=True)
+    if titles:
+        mismatched = [r["チャンネル名"] for r in core.channel_summary(existing, titles)
+                      if r["投稿先スペース名"] not in ("（取得できません）", r["チャンネル名"])]
+        if mismatched:
+            st.caption(f":material/info: チャンネル名とスペース名が異なるもの: {'、'.join(mismatched)}。"
+                       "カテゴリ配信のチャンネルは、`categories:` を省略していると"
+                       "**名前がカテゴリ名として使われる**ため、名前を変えるとカテゴリも"
+                       "指定し直す必要があります。")
 
     graph = core.routing_graph(existing)
     if "->" in graph:
@@ -733,6 +841,41 @@ def _render_overview_feeds(existing: core.ExistingConfig) -> None:
                    f"その他 {len(regions['keywords']['other'])} 語")
 
 
+def _render_os_block() -> bool:
+    """いまの OS と、そこで使う仕組みを示す。登録できない OS なら False。"""
+    info = core.scheduler_info()
+    if not info.supported:
+        st.warning(f"**{core.os_label()} 向けの登録機能はありません。**\n\n{info.note}",
+                   icon=":material/computer:")
+        st.caption("設定ファイルの作成や dry-run など、他のタブの機能はそのまま使えます。")
+        return False
+    st.info(f"**いま動かしているのは {core.os_label()} です。**\n\n"
+            f"- 使う仕組み: **{info.mechanism}**\n"
+            f"- 登録先: `{info.where}`\n"
+            f"- 定時実行から呼ばれるファイル: `{info.runner}`",
+            icon=":material/computer:")
+    if info.note:
+        st.caption(f":material/lightbulb: {info.note}")
+    return True
+
+
+def _render_location_block() -> bool:
+    """置き場所が自動実行に使えるかを確かめる。使えなければ理由を出して False。
+
+    TCC 保護下（書類・デスクトップ・ダウンロード・iCloud Drive）に置いていると、
+    launchd から設定ファイルを読めず**定時実行だけが静かに失敗する**。
+    手動実行は成功するため気づきにくい。登録させずにここで止める。
+    """
+    location = core.check_location()
+    if location.ok:
+        return True
+    st.error(f"**この置き場所では自動実行を設定できません。**\n\n"
+             f"{location.detail}\n\n{location.hint}", icon=":material/block:")
+    st.caption("いまの場所でも「いますぐ1回実行」や手動実行は動きます。"
+               "動かないのは定時実行だけなので、登録しても気づきにくい失敗になります。")
+    return False
+
+
 def _render_schedule_help(hour: int, minute: int, weekdays: list[int]) -> None:
     """自動実行がうまく動かないときの手当てをまとめて出す。"""
     with st.expander("うまく動かないときは"):
@@ -758,11 +901,11 @@ def render_scheduler() -> None:
     st.caption("時刻はすべて**日本時間（JST）**です。配信の見出しに入る日付も、記事に付く"
                "時刻も、月曜だけ週末分をまとめる判定も、本体が日本時間で処理するためです。")
 
-    import platform
-    system = platform.system()
-    mechanism = {"Darwin": "macOS の launchd", "Windows": "Windows のタスク スケジューラ"}.get(
-        system, f"{system}（cron などをお使いください）")
-    st.caption(f"この環境では **{mechanism}** に登録します。")
+    if not _render_os_block():
+        return
+
+    if not _render_location_block():
+        return
 
     registered, detail = core.schedule_status()
     if registered:
@@ -807,6 +950,92 @@ def render_scheduler() -> None:
 
 
 
+def _save_repaired_token(name: str, token: str) -> bool:
+    """貼り直したトークンを検証して .env へ保存する。保存できたら True。"""
+    token = (token or "").strip()
+    if not token:
+        st.error("トークンが入力されていません。")
+        return False
+    with st.spinner("Webex に問い合わせています..."):
+        owner, address = core.token_identity(token)
+        shared = core.env_vars_sharing_token(token, exclude=name)
+        ok, message = core.replace_env_token(name, token)
+    if not ok:
+        st.error(message)
+        return False
+    who = f"　このトークンは **{owner}**（`{address}`）のものです。" if owner else ""
+    notice = {"ok": message + who}
+    if shared:
+        notice["warn"] = (f"同じトークンが {'、'.join(shared)} にも入っています。"
+                          "1つの bot を複数スペースで使う設定でなければ、貼り間違いの可能性があります。")
+    st.session_state["repair_notice"] = notice
+    st.session_state["token_rows"] = core.check_all_tokens()
+    st.session_state.pop("validated_token", None)  # セットアップ側の検証結果も作り直す
+    return True
+
+
+def _render_repair_notice() -> None:
+    """直前の貼り直し結果を表示する（st.rerun をまたいで伝えるため）。"""
+    notice = st.session_state.pop("repair_notice", None)
+    if not notice:
+        return
+    st.success(notice["ok"])
+    if notice.get("warn"):
+        st.warning(notice["warn"])
+
+
+def _render_token_form(name: str, key_prefix: str = "repair") -> None:
+    """トークン変数1件分の貼り直し欄。
+
+    セットアップタブと「bot とスペース」タブの両方から使うため、
+    ウィジェットキーが衝突しないよう key_prefix で分ける。
+    """
+    with st.form(f"{key_prefix}_{name}", border=True):
+        st.markdown(f"**{name}**")
+        new_token = st.text_input("新しい Bot アクセストークン", type="password",
+                                  key=f"{key_prefix}_input_{name}",
+                                  placeholder="Regenerate で表示されたトークンを貼り付け")
+        if st.form_submit_button("確認して保存", type="primary"):
+            if _save_repaired_token(name, new_token):
+                st.rerun()
+
+
+def _render_regenerate_guide() -> None:
+    """トークン再発行のやり方と、書き換えの安全性を説明する。"""
+    st.markdown(
+        f"[Webex Developer Portal]({core.BOT_LIST_URL}) で該当の bot を開き、"
+        "**Regenerate** で新しいアクセストークンを発行してから、下の欄に貼り付けてください。"
+        "再発行すると古いトークンはその時点で失効します。")
+    st.caption("有効だと確認できたときだけ `.env` を書き換えます。"
+               "書き換える前に控え（`.env.bak-日時`）を残します。入力した値は表示・保存記録に残しません。")
+
+
+def _render_no_space_help(token: str) -> None:
+    """トークンは有効だが参加スペースが無いときに、bot の招待方法を案内する。"""
+    owner, address = core.token_identity(token)
+    who = f"**{owner}**" if owner else "この bot"
+    st.warning(
+        f"{who} はまだどのスペースにも参加していないため、配信先を選べません。",
+        icon=":material/group_add:")
+    st.markdown(
+        "**Webex で bot をスペースに追加してください。**\n\n"
+        "1. Webex アプリで、配信したいスペースを開く\n"
+        "2. スペース名 →「メンバーを追加」（People → Add people）\n"
+        f"3. bot のアドレス {f'`{address}`' if address else '（`〜@webex.bot`）'} を入力して追加\n"
+        "4. 追加できたら、この画面を再読み込みする")
+    if not address:
+        st.caption("bot のアドレスが取得できませんでした。Developer Portal の bot 詳細で確認できます。")
+
+
+def _render_token_repair(broken: list[str]) -> None:
+    """無効なトークンを、その場で貼り直せるようにする。"""
+    _render_repair_notice()
+    st.error(f"次のトークンが使えません: {'、'.join(broken)}")
+    _render_regenerate_guide()
+    for name in broken:
+        _render_token_form(name)
+
+
 def render_space_inspector() -> None:
     """bot とスペースの確認タブ: 参加スペースの一覧と、全トークンの有効性。"""
     st.header("bot とスペースの確認")
@@ -822,17 +1051,25 @@ def render_space_inspector() -> None:
         configured[sid] = (configured[sid] + "、" + label) if sid in configured else label
 
     st.subheader("スペースとその ID を調べる")
-    token, label = _pick_token(known)
+    _render_repair_notice()
+    token, label, token_var = _pick_token(known)
     if st.button("スペースを取得", key="fetch_spaces", type="primary", disabled=not token):
         with st.spinner("Webex に問い合わせています..."):
             ok, message = core.validate_token(token)
             st.session_state["inspect_error"] = None if ok else f"{message}（{label}）"
+            st.session_state["inspect_var"] = "" if ok else token_var
             st.session_state["inspect_rows"] = (
                 core.space_rows(core.list_spaces(token), configured) if ok else None)
 
     if st.session_state.get("inspect_error"):
         st.error(st.session_state["inspect_error"])
+        broken_var = st.session_state.get("inspect_var")
+        if broken_var:
+            _render_regenerate_guide()
+            _render_token_form(broken_var, key_prefix="inspect_repair")
     rows = st.session_state.get("inspect_rows")
+    if rows is not None and not rows:
+        _render_no_space_help(token)
     if rows:
         st.success(f"{len(rows)} 件のスペースが見つかりました。")
         st.dataframe(rows, width="stretch", hide_index=True)
@@ -841,6 +1078,11 @@ def render_space_inspector() -> None:
         _render_env_line_builder(rows)
 
     st.divider()
+    _render_all_token_check()
+
+
+def _render_all_token_check() -> None:
+    """`.env` の全トークンをまとめて確認し、無効なものは貼り直せるようにする。"""
     st.subheader("すべてのトークンを確認")
     st.caption("`.env` にあるトークンを順に試し、有効かどうかと参加スペース数を表示します"
                "（値は表示しません）。")
@@ -848,16 +1090,24 @@ def render_space_inspector() -> None:
         with st.spinner("Webex に問い合わせています..."):
             st.session_state["token_rows"] = core.check_all_tokens()
     token_rows = st.session_state.get("token_rows")
-    if token_rows:
-        st.dataframe(token_rows, width="stretch", hide_index=True)
-        broken = [r for r in token_rows if r["状態"] != "有効"]
-        if broken:
-            names = "、".join(r["変数名"] for r in broken)
-            st.error(f"次のトークンが使えません: {names}\n\n"
-                     "Webex Developer Portal で該当 bot のトークンを再発行し、"
-                     "`.env` の該当行を差し替えてください。")
-        else:
-            st.success("すべてのトークンが有効です。")
+    if not token_rows:
+        return
+    st.dataframe(token_rows, width="stretch", hide_index=True)
+    broken = [r["変数名"] for r in token_rows if r["状態"] != "有効"]
+    empty = [r["変数名"] for r in token_rows
+             if r["状態"] == "有効" and r["参加スペース数"] == "0"]
+    if broken:
+        _render_token_repair(broken)
+    else:
+        st.success("すべてのトークンが有効です。")
+    if empty:
+        st.warning(
+            f"次の bot はトークンは有効ですが、**どのスペースにも参加していません**: "
+            f"{'、'.join(empty)}\n\n"
+            "Webex で配信したいスペースを開き、スペース名 →「メンバーを追加」から "
+            "bot のアドレス（`〜@webex.bot`）を追加してください。"
+            "追加するまで、この bot を使うチャンネルは配信先を選べません。",
+            icon=":material/group_add:")
 
 
 def _render_feed_list(existing: core.ExistingConfig) -> tuple[list[str], list[str]]:
@@ -1027,13 +1277,46 @@ def _render_region_editor() -> tuple[dict[str, int], list[str], list[str]]:
     return {"japan": japan, "us": us, "other": other}, us_list, other_list
 
 
+def _render_digest_channel_blocks(existing: core.ExistingConfig | None) -> dict[str, dict]:
+    """ダイジェストチャンネルごとに、載せる枠と天気の見せ方を選ぶ。
+
+    戻り値は {チャンネル名（原文）: {digest_blocks, weather_format}}。
+    """
+    digest_channels = [c for c in (existing.all_channels if existing else [])
+                       if c.get("digest")]
+    st.subheader("ダイジェストに載せるもの")
+    if not digest_channels:
+        st.caption("ダイジェストチャンネルがまだありません。"
+                   "「セットアップ」タブで、送るものに「ダイジェスト」を選んだチャンネルを作ると"
+                   "ここに出ます。")
+        return {}
+
+    st.caption("チェックした順ではなく、下に並んでいる順で投稿されます。")
+    chosen: dict[str, dict] = {}
+    for channel in digest_channels:
+        raw_name = str(channel.get("name") or "")
+        label = core.expand_category_name(raw_name)
+        key = _widget_key(core._expand_env(channel.get("webex_space_id")), raw_name)
+        with st.container(border=True):
+            st.markdown(f"**{label}**")
+            chosen[raw_name] = _render_digest_options(key, {
+                "digest_blocks": (channel["digest_blocks"]
+                                  if isinstance(channel.get("digest_blocks"), list) else None),
+                "weather_format": str(channel.get("weather_format") or ""),
+            })
+    return chosen
+
+
 def render_digest_manager() -> None:
-    """ダイジェストタブ: 天気の地点と、時事ダイジェストの地域バランス。"""
+    """ダイジェストタブ: 載せる枠、天気の地点と見せ方、時事の地域バランス。"""
     st.header("ダイジェストの設定")
-    st.caption("**ダイジェスト（天気＋まとめ）チャンネル**の中身を調整します。"
+    st.caption("**ダイジェストチャンネル**の中身を調整します。"
                "ダイジェストを使っていない場合、この設定は配信に影響しません。")
 
     existing = core.load_existing_config()
+    block_choices = _render_digest_channel_blocks(existing)
+
+    st.divider()
     others = [e for e in (existing.special_feeds if existing else []) if "group" not in e]
     weather_entry = _render_weather_editor(others)
 
@@ -1044,11 +1327,17 @@ def render_digest_manager() -> None:
     files = [core.REGIONS_FILE.name]
     if existing is not None:
         files.insert(0, core.URLS_FILE.name)
+    if block_choices:
+        files.insert(0, core.CHANNELS_FILE.name)
     agreed = _render_change_review({}, files, "digest")
     if st.button("ダイジェストの設定を保存", type="primary", key="save_digest",
                  disabled=not agreed):
         results = []
         try:
+            if block_choices and existing is not None:
+                results.append(core.backup_and_write(
+                    core.CHANNELS_FILE, core.channels_text_with_digest_blocks(
+                        existing, block_choices)))
             if existing is not None:
                 groups = [e for e in existing.special_feeds if "group" in e]
                 rest = [e for e in others if "weather" not in e]
@@ -1266,16 +1555,16 @@ def main() -> None:
         if existing:
             st.success(f"既存の設定を読み込みました（{existing.summary}）。"
                        "各ステップに現在の内容が初期値として入っています。", icon=":material/history:")
-        token = render_bot()
-        token = render_token(token)
+        token, token_var = render_bot()
+        token = render_token(token, token_var)
         if not token:
             st.stop()
-        plans = render_channels(categories, existing)
+        plans, removed_names = render_channels(categories, existing)
         if not plans:
             st.warning("配信するスペースを1つ以上選んでください。")
             st.stop()
         feeds = render_feeds(existing)
-        render_write(token, plans, feeds, existing)
+        render_write(token, plans, feeds, existing, removed_names=removed_names)
         render_dry_run()
 
 
