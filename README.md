@@ -1,11 +1,11 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v4.25.0-blue)
+![Version](https://img.shields.io/badge/version-v4.26.0-blue)
 ![Release Date](https://img.shields.io/badge/release-2026--08--01-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v4.25.0` ／ **Release Date**: 2026-09-10
+**Version**: `v4.26.0` ／ **Release Date**: 2026-09-10
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約・再ランクスクリプト / RSS-to-Webex News Notifier with LLM Summary & Re-ranking**
 
@@ -1054,12 +1054,21 @@ All URLs — RSS feeds and external APIs alike — live here, never hard-coded i
     locations:
       - { label: 東京, lat: 35.6895, lon: 139.6917 }
 
-# 4. Cisco Security Advisory の CVSS 取得API（{adv_id} が Advisory ID に置き換わる）
-- cisco_advisory:
-    cvrf_url: https://sec.cloudapps.cisco.com/security/center/contentxml/CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
 ```
 
-形式 2〜4 は RSS ではないため、**記事の収集対象からは自動的に除外されます**。3 と 4 は任意で、書かなければその機能（天気ブロック／CVSS バッジ）を省いて動きます。
+形式 2・3 は RSS ではないため、**記事の収集対象からは自動的に除外されます**。天気は任意で、書かなければダイジェストの天気ブロックを省いて動きます。
+
+**Cisco Security Advisory の CVSS バッジ**は、グループに `cvrf_url` を添えると付きます。「どこから集めるか」と「どう色を付けるか」を同じ場所に置くための書き方です。
+
+```yaml
+- group: Cisco-Security-Advisories
+  urls:
+    - https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml
+  # {adv_id} が Advisory ID に置き換わる。書かなければバッジを付けずに配信する
+  cvrf_url: https://sec.cloudapps.cisco.com/security/center/contentxml/CiscoSecurityAdvisory/{adv_id}/cvrf/{adv_id}_cvrf.xml
+```
+
+> v4.21 以前の書き方（独立した `- cisco_advisory:` エントリ）もそのまま読めます。両方ある場合はグループ側が使われます。
 
 > グループは、特定フィード由来の記事を専用チャンネルへ振り分けるための仕組みです。詳細は[ソースベース振り分けと Cisco Security Advisories](#ソースベース振り分けと-cisco-security-advisories--source-based-routing--cvss)を参照。
 
@@ -1703,17 +1712,18 @@ Webex スペースの一覧・検索と、`.env` / `config.yml` に書く行の�
 
 ### 疎通確認先を変える / Changing what is checked
 
-確認先は `urls.yml` の `healthcheck:` に書きます（コードには直書きしません）。
+確認先は `endpoints.yml` の `healthcheck:` に書きます（コードには直書きしません）。
+`urls.yml` ではなく `endpoints.yml` なのは、購読するフィードのような**利用者が育てる設定**ではなく、
+アプリが動くために必要な**固定の宛先**だからです。
 
 ```yaml
-feeds:
-  - healthcheck:
-      timeout: 10          # 1件あたりの待ち時間（秒）
-      urls:
-      - url: https://www.cisco.com        # 一般的なインターネット疎通
-        expect: [200]
-      - url: https://webexapis.com/v1/ping  # 実際の投稿先
-        expect: [200]
+healthcheck:
+  timeout: 10          # 1件あたりの待ち時間（秒）
+  urls:
+  - url: https://www.cisco.com        # 一般的なインターネット疎通
+    expect: [200]
+  - url: https://webexapis.com/v1/ping  # 実際の投稿先
+    expect: [200]
 ```
 
 `expect` には許容する HTTP ステータスを並べます。**すべての URL が通ったときだけ**配信します。
@@ -1729,7 +1739,7 @@ feeds:
 [疎通確認/OK] https://webexapis.com/v1/ping → DNS 170.72.236.72 / HTTP 200
 ```
 
-> `healthcheck:` を書かなかった場合は確認を省略して配信します（設定漏れで配信そのものが止まらないようにするため）。
+> `healthcheck:` が無い場合は確認を省略して配信します（設定漏れで配信そのものが止まらないようにするため）。
 
 見送った回とやり直しの理由は `log/gate.log` に残ります。
 また macOS では、実行中に Mac が寝てしまわないよう `caffeinate` を挟んでいます（スリープ復帰後に名前解決が壊れ、全チャンネル失敗する事象への対策）。
@@ -1812,11 +1822,13 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 | Version | 日付 | 何をしたか |
 |:---|:---|:---|
-| **v4.25.0** | 2026-09-10 | 配信前に**ネットワークの疎通確認**（DNS が引けるか＋HTTP 応答）を行うようにした。確認先は `urls.yml` の `healthcheck:` に外出し。繋がっていなければ配信を見送り、**30分後にやり直す**（予約を毎時から30分ごとへ変更）。無線が切れている朝に配信が丸ごと落ちるのを防ぐ。 |
-| **v4.24.0** | 2026-08-29 | 配信失敗への耐性を追加。送信を最大3回やり直し、1件も送れなかった日は「配信済み」にせず次の30分ごとのチェックで再試行する。実行中に Mac が寝て名前解決が壊れるのを `caffeinate` で防止。`.env` のスペースID をコメントアウトして**チャンネル単位で一時停止**できることを明記。 |
-| **v4.23.0** | 2026-08-25 | 定時実行を**タイムゾーンに一切依存しない**作りに変更。予約は30分ごとに固定し、配信するかどうかは実行時に日本時間で判断する。launchd がカレンダー計算と起動プロセスで別のタイムゾーンを使う Mac があり、ローカル時刻を計算して予約する方式（v4.15.0）が当てにならなかったため。 |
-| **v4.22.0** | 2026-08-23 | 定時実行の時刻指定を**日本時間（JST）基準**に変更した。パソコンのタイムゾーンが日本以外でも、日本時間の指定時刻どおりに配信される（夏時間の切り替わりも自動で吸収）。あわせて `webex-news-rss-bot.plist.example` がXML として壊れていた不具合（コメント内の `--`）を修正。 |
-| **v4.21.0** | 2026-08-03 | **いまどの OS で動いているかを自動実行タブに明示**するようにした（使う仕組み・登録先・呼ばれるファイル・その OS 固有の注意まで）。あわせて OS 判定を1か所（`current_os()`）に集約。**これまでは「Windows かどうか」だけで分岐しており、Linux などが macOS 扱い**になって `~/Library/LaunchAgents` に plist を書き `launchctl` を呼ぼうとしていた。未対応 OS では登録操作を出さず、cron の例を案内する。Windows のタスク登録コマンドで `/TR` に二重の引用符が付く問題も修正。 |
+| **v4.26.0** | 2026-09-10 | 配信前に**ネットワークの疎通確認**（DNS が引けるか＋HTTP 応答）を行うようにした。確認先は `endpoints.yml` の `healthcheck:` に外出し。繋がっていなければ配信を見送り、**30分後にやり直す**（予約を毎時から30分ごとへ変更）。無線が切れている朝に配信が丸ごと落ちるのを防ぐ。 |
+| **v4.25.0** | 2026-08-29 | 配信失敗への耐性を追加。送信を最大3回やり直し、1件も送れなかった日は「配信済み」にせず次の30分ごとのチェックで再試行する。実行中に Mac が寝て名前解決が壊れるのを `caffeinate` で防止。`.env` のスペースID をコメントアウトして**チャンネル単位で一時停止**できることを明記。 |
+| **v4.24.0** | 2026-08-25 | 定時実行を**タイムゾーンに一切依存しない**作りに変更。予約は30分ごとに固定し、配信するかどうかは実行時に日本時間で判断する。launchd がカレンダー計算と起動プロセスで別のタイムゾーンを使う Mac があり、ローカル時刻を計算して予約する方式（v4.15.0）が当てにならなかったため。 |
+| **v4.23.0** | 2026-08-23 | 定時実行の時刻指定を**日本時間（JST）基準**に変更した。パソコンのタイムゾーンが日本以外でも、日本時間の指定時刻どおりに配信される（夏時間の切り替わりも自動で吸収）。あわせて `webex-news-rss-bot.plist.example` がXML として壊れていた不具合（コメント内の `--`）を修正。 |
+| **v4.22.0** | 2026-08-04 | **Cisco Security Advisory の設定を1か所にまとめた**。「どこから集めるか」（グループの `urls`）と「その記事に CVSS をどう付けるか」（`cvrf_url`）が `urls.yml` の離れた2エントリに分かれていたため、グループに `cvrf_url` を直接書けるようにした。旧形式（独立した `cisco_advisory:` エントリ）もそのまま読めます。 |
+| v4.21.1 | 2026-08-04 | 旧構成の `bots.yml` を削除（v4.0.0 で `channels.yml` に置き換わって以降、コードからは読まれていませんでした）。`.env.example` などに残っていた `bots.yml` という説明を `channels.yml` に直し、実際は `channels.yml` を読んでいた関数 `load_bots()` を `load_channels()` へ改名。v1.x からの移行手順（README 内）は、移行元の説明としてそのまま残しています。 |
+| v4.21.0 | 2026-08-03 | **いまどの OS で動いているかを自動実行タブに明示**するようにした（使う仕組み・登録先・呼ばれるファイル・その OS 固有の注意まで）。あわせて OS 判定を1か所（`current_os()`）に集約。**これまでは「Windows かどうか」だけで分岐しており、Linux などが macOS 扱い**になって `~/Library/LaunchAgents` に plist を書き `launchctl` を呼ぼうとしていた。未対応 OS では登録操作を出さず、cron の例を案内する。Windows のタスク登録コマンドで `/TR` に二重の引用符が付く問題も修正。 |
 | v4.20.0 | 2026-08-03 | **配信件数をスペースごとに変えられる**ようにした（`max_items`。未指定なら従来どおり15件、1〜50の範囲）。超えた分を AI が絞り込む点は変わりません。**ダイジェストの枠の選択を「ダイジェスト」タブへ移した**（v4.19.0 ではセットアップタブのチャンネル設定の中にあり、ダイジェストの中身を決める設定がダイジェストタブから見つからなかった）。**置き場所が TCC 保護下のときは、自動実行タブで登録できないことを理由つきで表示**するようにした（これまでは登録でき、定時実行だけが静かに失敗していた）。 |
 | v4.19.1 | 2026-08-03 | 「設定の全体像」タブに**投稿先スペースの実際の名前**を出せるようにした。これまで表示されるのは変数名（`${WEBEX_SPACE_ID_...}`）だけで、どのチャンネルがどのスペースへ届くのか画面から確かめられなかった。ボタンを押すと列が増え、チャンネル名と食い違っているものを下に列挙する。**チャンネル名は投稿の見出しで、スペース名とは別物**という説明も添えた（`categories:` を省略しているチャンネルは名前がカテゴリ名として使われるため、改名すると配信が止まる）。 |
 | v4.19.0 | 2026-08-03 | **ダイジェストの中身を選べる**ようにした。天気／各チャンネルのまとめ／時事ダイジェストをオンオフでき、順番も指定できる（`digest_blocks`）。**天気に湿度を追加**し（現在の湿度と、今日・明日の平均湿度）、**表形式**で地点を縦に並べる見せ方を新設して既定にした（`weather_format: table`。従来の箇条書きは `list`）。Webex は Markdown の表に対応していないため、等幅のコードブロックで全角文字と絵文字の表示幅を数えて桁を揃えている。**時事ダイジェストの既定はオフ**に変更したので、これまでどおり出したい場合は `digest_blocks` に `jiji` を足すか、セットアップタブでチェックを入れてください。 |
