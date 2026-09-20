@@ -103,14 +103,41 @@ fi
 KEEP_AWAKE=""
 command -v caffeinate >/dev/null 2>&1 && KEEP_AWAKE="caffeinate -i -m -s"
 
+# --- 収集 → 生成 → 投稿 / Collect, compose, post ---
+# 記事の選定と要約は Claude Code に任せる（--llm-mode compose）。中間ファイルは
+# log/compose/<run_id>/ に残るので、あとから同じ材料で投稿をやり直せる。
+COMPOSE_DIR="$LOG_DIR/compose/$TIMESTAMP"
+# 生成が通らないまま配信時刻から2時間が過ぎたら、その日を空振りにしないために
+# AI を使わない簡易モードで投稿する（投稿の末尾に印が付く）。
+FALLBACK_HOUR=$((10#$TARGET_HOUR + 2))
+[ "$FALLBACK_HOUR" -gt 23 ] && FALLBACK_HOUR=23
+
 $KEEP_AWAKE "$TARGET_DIR/bin/python" "$TARGET_DIR/webex-news-rss-bot.py" --weekend-catchup \
+    --pipeline --llm-mode compose --run-id "$TIMESTAMP" \
     >> "$LOG_FILE" 2>> "$ERR_FILE"
 status=$?
 
-# 終了コード 2 = 1件も送れなかった（一時的な障害）。記録を残さず、次の毎時チェックに任せる。
-if [ "$status" -eq 2 ]; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') retry: 1件も送信できなかったため再試行します（日本時間 ${JST_DATE}）" >> "$GATE_LOG"
+# 終了コード 3 = 生成を検証で落とし、投稿を見送った。
+if [ "$status" -eq 3 ] && [ "$((10#$JST_HOUR))" -ge "$FALLBACK_HOUR" ]; then
+    echo "[run_rssbot] 生成が通らないまま日本時間 ${FALLBACK_HOUR}時を過ぎたため、簡易モードで配信します" >> "$LOG_FILE"
+    $KEEP_AWAKE "$TARGET_DIR/bin/python" "$TARGET_DIR/webex-news-rss-bot.py" \
+        --post-from "$COMPOSE_DIR" --llm-mode none \
+        >> "$LOG_FILE" 2>> "$ERR_FILE"
+    status=$?
+fi
+
+# 中間ファイルの掃除。7日より古い run のディレクトリだけを消す
+# （-mindepth 1 が無いと log/compose 自体が対象になり、新しい run まで消える）。
+if [ -d "$LOG_DIR/compose" ]; then
+    find "$LOG_DIR/compose" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null
+fi
+
+# 終了コード 2 = 1件も送れなかった（一時的な障害） / 3 = 生成を採用できず見送った。
+# どちらも「配信済み」の記録を残さず、次の30分ごとのチェックでやり直す。
+if [ "$status" -eq 2 ] || [ "$status" -eq 3 ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') retry: 配信しなかったため再試行します（status=$status / 日本時間 ${JST_DATE}）" >> "$GATE_LOG"
     exit 0
 fi
+# 終了コード 4 = 設定や入出力の誤り。やり直しても直らないので、その日は打ち切る。
 echo "$JST_DATE" > "$STAMP"
 exit "$status"

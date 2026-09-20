@@ -16,6 +16,8 @@
 !channels.yml.example
 !endpoints.yml
 !endpoints.py
+!compose_select.md
+!compose_summarize.md
 !regions.yml.example
 !check_rooms.py
 !check_rooms_ui.py

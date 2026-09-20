@@ -1,11 +1,11 @@
 # webex-news-rss-bot
 
-![Version](https://img.shields.io/badge/version-v4.26.0-blue)
-![Release Date](https://img.shields.io/badge/release-2026--08--01-green)
+![Version](https://img.shields.io/badge/version-v4.27.0-blue)
+![Release Date](https://img.shields.io/badge/release-2026--09--20-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**Version**: `v4.26.0` ／ **Release Date**: 2026-09-10
+**Version**: `v4.27.0` ／ **Release Date**: 2026-09-20
 
 > **RSS → Webex Bot ニュース通知 ＆ LLM自動要約・再ランクスクリプト / RSS-to-Webex News Notifier with LLM Summary & Re-ranking**
 
@@ -94,6 +94,7 @@ Python やサーバの知識は要りません。この README に出てくる�
 - [プライベートカテゴリ運用（my-fab パターン）/ Private Category Usage](#プライベートカテゴリ運用my-fab-パターン-private-category-usage)
 - [AI による自動要約 ＆ 超エコノミーモード / LLM Summarization & Eco-mode](#ai-による自動要約--超エコノミーモード--llm-summarization--eco-mode)
 - [LLMによるニュース選出（再ランク）/ LLM Re-ranking](#llmによるニュース選出再ランク--llm-re-ranking)
+- [収集 → 生成 → 投稿 の3段分割 / Compose pipeline](#収集--生成--投稿-の3段分割--compose-pipeline)
 - [自動実行 / Automation (cron / launchd)](#自動実行--automation-cron--launchd)
 - [macOS の制限と設計上の理由 / macOS Restrictions & Design Rationale](#macos-の制限と設計上の理由--macos-restrictions--design-rationale)
 - [Windows での利用 / Running on Windows](#windows-での利用--running-on-windows)
@@ -1312,6 +1313,98 @@ Re-ranking costs a single API call (max_tokens=200) per over-limit channel — a
 
 ---
 
+## 収集 → 生成 → 投稿 の3段分割 / Compose pipeline
+
+v4.27.0 から、1回の配信を**3つの段**に分けて走らせられます。段のあいだは JSON の中間ファイル
+（`log/compose/<run_id>/`）で受け渡すので、**生成だけをやり直す**、**同じ材料で投稿だけを試す**
+といったことができます。
+
+> **フラグを何も付けない実行は、これまでとまったく同じです。** 以下は付けたときだけ働きます。
+
+| 段 | 何をするか | 作られるファイル |
+|:---|:---|:---|
+| 収集 | RSS を集め、チャンネルごとの候補を決める | `state.json`（正本）/ `candidates.json`（生成側へ渡す入力） |
+| 生成 | 候補から「どれを配信するか」と「要約」を作る | `selected.json` / `composed.json` |
+| 投稿 | 生成結果を検証し、通ったものだけ Webex へ送る | `validation.json`（検証結果） |
+
+### 使い方 / Usage
+
+```bash
+# 収集から投稿までを1プロセスで通す（生成は Claude Code に任せる）
+./bin/python webex-news-rss-bot.py --pipeline --llm-mode compose --run-id 20260920-090100
+
+# 収集だけ行って中間ファイルを書き出す（投稿しない）
+./bin/python webex-news-rss-bot.py --emit-candidates log/compose/test-001
+
+# 書き出した候補から選定・要約だけを作る（投稿しない）
+./bin/python webex-news-rss-bot.py --compose log/compose/test-001
+
+# 収集せずに、書き出した内容から配信する（まずは --dry-run で確認）
+./bin/python webex-news-rss-bot.py --post-from log/compose/test-001 --dry-run
+```
+
+| フラグ | 意味 |
+|:---|:---|
+| `--pipeline` | 収集→生成→投稿を1プロセスで通す（中間ファイルは `log/compose/<run_id>/`） |
+| `--emit-candidates DIR` | 収集だけ行い、`DIR` に書き出して終了する |
+| `--compose DIR` | `DIR` の候補から `selected.json` / `composed.json` を作って終了する |
+| `--post-from DIR` | 収集せず、`DIR` の内容から配信する |
+| `--llm-mode {api,compose,none}` | 要約・選定の担い手。既定 `api`（**従来どおり**）／`compose`（生成バックエンド）／`none`（AI を使わない） |
+| `--compose-backend NAME` | 生成バックエンド名（既定は `endpoints.yml` の `compose.default`） |
+| `--compose-model MODEL` | 生成に使うモデル（既定はバックエンドの `default_model`） |
+| `--compose-timeout SEC` | 生成の制限時間（既定 900 秒。CLI バックエンドに適用） |
+| `--run-id ID` | 中間ファイルのディレクトリ名（既定は実行時刻 `YYYYMMDD-HHMMSS`） |
+
+3段分割はマルチチャンネルモード（`channels.yml`）専用です。シングルボットモードで指定した場合は、
+黙って無視せずその場で停止します。
+
+### 生成バックエンド / Compose backends
+
+「誰に生成させるか」は `endpoints.yml` の `compose:` で決めます（コードには書きません）。
+手元のコマンド（`kind: cli`）でも、従来と同じ HTTP API（`kind: api`）でも、**同じ指示ファイル・
+同じ JSON の契約**で動きます。
+
+| バックエンド | 種類 | 既定モデル | 備考 |
+|:---|:---|:---|:---|
+| `claude`（既定） | CLI | `sonnet` | Claude Code を起動する。API キーは環境から外して渡す |
+| `codex` | CLI | `gpt-5` | `codex exec` を起動する |
+| `anthropic` / `openai` / `gemini` | API | Haiku / gpt-5-mini / 2.5-flash | 要約と同じキー（`.env`）を使う。従量課金 |
+
+コマンドが見つからない場合は、**黙って別の方法に切り替えず**「バックエンド X は利用できません」と
+表示して止まります。場所を指定したいときは `.env` に絶対パスを書きます（例 `COMPOSE_CLAUDE_BIN=/opt/homebrew/bin/claude`）。
+
+生成への指示はリポジトリ直下の2ファイルです。どのバックエンドでも同じものを使います。
+
+- `compose_select.md` … パス A（どの記事を選ぶか）
+- `compose_summarize.md` … パス B（選ばれた記事をどう要約するか）
+
+### 検証 / Validation
+
+生成結果は**そのまま配信しません**。`state.json` を正本として突き合わせ、信用するのは
+「id の並び」と「要約の文字列」だけです（タイトル・リンク・公開日時は必ず収集時の値を使います）。
+
+- 候補にない id・重複・件数の過不足 → 破棄／切り詰め／不足分の補充
+- 1件も選ばれなかったチャンネル → そのチャンネルだけ従来の階層化抽出で埋める
+- 要約に URL がある／日本語が無い／130字超 → その記事だけ**原文**に戻す
+- 111〜130字 → 109字で切って「…」を付ける
+- run 全体で原文に戻った割合が **30% を超えたら、その run は投稿を見送る**
+
+結果は `validation.json` と実行ログに残ります。
+
+```
+採用 41 件 / 切り詰め 1 件 / 原文 3 件（うち欠落 0 件）/ SKIP-API 1 件
+破棄id 4 / 補充 7 / チャンネル救済 1 / 共有 0 / 失格率 6.8%
+```
+
+### 中間ファイルに入らないもの / What is never written
+
+Webex のトークンやスペース ID は中間ファイルに書きません。生成側へ渡す `candidates.json` には
+**記事の URL も入れません**（ドメインだけ）。生成に要らない情報は渡さない、という方針です。
+
+古い中間ファイルは `run_rssbot.sh` が7日を過ぎたものから削除します。
+
+---
+
 ## 自動実行 / Automation (cron / launchd)
 
 定期的にスクリプトを自動実行し、Webexに最新ニュースを流すには、OSに合わせてスケジュール実行を設定します。
@@ -1388,6 +1481,24 @@ launchctl start com.webex-news.rssbot
 
 テンプレートの既定は **平日（月〜金）9:01 実行**で、`run_rssbot.sh` は `--weekend-catchup`（月曜のみ72時間分を取得）付きで本体を呼びます。毎日実行にしたい場合は plist の `StartCalendarInterval` を単一 `<dict>` にし、`--weekend-catchup` を外してください。  
 The templates default to weekdays 09:01 with `--weekend-catchup`; edit both files for a daily schedule.
+
+#### 毎朝の流れ / What the wrapper does
+
+`run_rssbot.sh` は、日本時間のゲート（配信すべき回か）→ ネットワークの疎通確認 → 本体の実行、の順に進みます。
+本体は **収集→生成→投稿を1プロセスで通す形**（`--pipeline --llm-mode compose`）で呼ばれ、
+中間ファイルは `log/compose/<実行時刻>/` に残ります。
+
+| 本体の終了コード | ラッパーの動き |
+|:---|:---|
+| 0 / 1 | 「配信済み」を記録して終了（1 は一部のスペースへ送れなかった回） |
+| 2 | 1件も送れなかった → 記録を残さず**30分後にやり直す** |
+| 3 | 生成を検証で落として見送った → 記録を残さず**30分後にやり直す**。ただし**日本時間で配信時刻＋2時間**（既定 11 時）を過ぎていれば、その日を空振りにしないために `--llm-mode none`（AI を使わない簡易モード）で配信する |
+| 4 | 設定・入出力の誤り（やり直しても直らない）→ 記録を残して終了 |
+
+簡易モードで配信した日は、**投稿の末尾に `⚠️ 本日は簡易モードで配信しています` と出ます**。
+生成が静かに壊れたまま、それらしい投稿が毎朝届き続ける状態に気づけるようにするためです。
+
+実行の終わりに、`log/compose/` の中で**7日より古い**中間ファイルのディレクトリを削除します。
 
 以下は、リポジトリが `~/Documents` など **TCC 保護下にある場合**の従来方式です。macOSのセキュリティ機能により、`Documents` や `Desktop` などの保護されたフォルダ内ではバックグラウンド実行がブロックされてしまう場合があります。そのため、ホームディレクトリ直下 (`~/rss-bot`) に専用の実行環境を構築・同期するデプロイスクリプトを用意しています。
 
@@ -1613,7 +1724,12 @@ Only code and `*.example` templates are tracked. Files marked 🔒 are gitignore
 ```text
 rss-bot/
 ├── webex-news-rss-bot.py      # メインの実行スクリプト (ニュース収集・要約・配信)
+├── endpoints.yml              # 外部APIの宛先（Webex / 要約AI / 天気 / 疎通確認 / 生成バックエンド）
+├── endpoints.py               # endpoints.yml を読む共有ローダ
+├── compose_select.md          # 3段分割：どの記事を選ぶかの指示（パスA）
+├── compose_summarize.md       # 3段分割：選ばれた記事をどう要約するかの指示（パスB）
 ├── analyze_filter.py          # フィルタ動作診断ツール (合格/near-miss/不一致を可視化)
+├── check_network.py           # 配信前の疎通確認（DNS＋HTTP。endpoints.yml の healthcheck:）
 ├── check_rooms.py             # Webex ルーム名・ID確認ツール（CLI）
 ├── check_rooms_ui.py          # 同ツールのブラウザUI版（Streamlit）
 ├── setup.py                   # 初期設定ウィザードのブートストラップ（標準ライブラリのみ）
@@ -1632,7 +1748,9 @@ rss-bot/
 │
 │   # ─ テンプレート / Templates（コピーして使う）─
 ├── .env.example               # 認証情報＆環境変数のテンプレート
-├── config.yml.example         # フィード一覧＋配信チャンネルのテンプレート（そのままでも動作）
+├── urls.yml.example           # 集めるRSSフィード・天気API・疎通確認先のテンプレート
+├── channels.yml.example       # 配信先チャンネル（どのスペースへ何を送るか）のテンプレート
+├── categories.yml.example     # カテゴリのキーワードのテンプレート
 ├── regions.yml.example        # ダイジェストの地域バランス設定のテンプレート
 ├── morning_messages.txt.example    # 朝メッセージ（投稿末尾のランダム署名）のテンプレート
 ├── categories-private.yml.example  # 非公開キーワードオーバーレイのテンプレート
@@ -1641,7 +1759,9 @@ rss-bot/
 │
 │   # ─ 各自で作成 / Created by you（🔒 Git対象外）─
 ├── .env                    🔒 # 認証情報＆環境変数
-├── config.yml              🔒 # フィード一覧（feeds:）＋配信チャンネル（channels:）
+├── urls.yml                🔒 # 集めるRSSフィード（feeds:）＋天気API
+├── channels.yml            🔒 # 配信先チャンネル（channels:）
+├── categories.yml          🔒 # カテゴリのキーワード
 ├── regions.yml             🔒 # 時事ダイジェストの地域バランス（任意）
 ├── morning_messages.txt    🔒 # 朝メッセージのリスト（任意）
 ├── categories-private.yml  🔒 # 非公開キーワードオーバーレイ（任意）
@@ -1649,6 +1769,7 @@ rss-bot/
 ├── webex-news-rss-bot.plist 🔒 # launchd ジョブ定義（自動実行する場合）
 ├── *.bak-YYYYMMDD-HHMMSS   🔒 # ウィザードが上書き前に作る退避ファイル（不要なら削除可）
 ├── log/                    🔒 # 実行ログ（launchd_run-YYYYMMDD-HHMMSS.log / launchd_err-...log）
+├── log/compose/            🔒 # 3段分割の中間ファイル（run_id ごと。7日より古いものは自動削除）
 └── bin/ lib/ include/      🔒 # 仮想環境 (python3 -m venv .)
 ```
 
@@ -1709,6 +1830,7 @@ Webex スペースの一覧・検索と、`.env` / `config.yml` に書く行の�
 | 1. 配信前の疎通確認 | 走らせる前に、**DNS が引けるか**と**期待した HTTP 応答が返るか**を確かめます。繋がらなければ最大2分待ち、それでも駄目なら**配信せずに終了**して「配信済み」記録も残しません。 |
 | 2. 送信のやり直し | 1通ごとに、つなぎ直しの失敗なら **5秒 → 20秒** と間を置いて最大3回試します。認証エラーなど待っても直らない失敗は、すぐあきらめます。 |
 | 3. 30分後のやり直し | 疎通確認に失敗した回、および**1件も送れなかった**回は「配信済み」にせず、**30分後**にやり直します。一部でも送れていれば二重投稿を避けるため、やり直しません。 |
+| 4. 生成が通らなかった回 | 選定・要約の検証に落ちた回（終了コード3）も「配信済み」にせず、**30分後**にやり直します。配信時刻＋2時間を過ぎても通らなければ、**AI を使わない簡易モード**で配信します（投稿の末尾に印が付きます）。 |
 
 ### 疎通確認先を変える / Changing what is checked
 
@@ -1810,6 +1932,25 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 * ただし **2026-07 現在、community.cisco.com はフィードリーダ系UAでも403を返す**ことが確認されています（サイト側のbot対策強化）。該当フィードのエラーはスクリプト内で握りつぶされ、他のフィードの収集は継続します。恒久対応（フィードの代替URL化・削除）は検討中です。
   As of 2026-07, community.cisco.com rejects even feed-reader UAs (403). These per-feed errors are caught and do not stop the run.
 
+### ❌ 投稿の末尾に「本日は簡易モードで配信しています」と出る
+* 選定・要約の生成が通らなかった日です。**AI を使わずに**見出し中心で配信しています（配信そのものは成功）。
+* 原因は `log/launchd_err-*.log` と `log/compose/<実行時刻>/validation.json` を見ます。よくあるのは
+  「生成バックエンドのコマンドが見つからない」「生成に時間がかかり切れた」「要約の失格率が30%を超えた」の3つです。
+* 同じ材料で生成だけをやり直せます: `./bin/python webex-news-rss-bot.py --compose log/compose/<実行時刻>`
+
+### ❌ `バックエンド claude は利用できません: コマンド 'claude' が PATH にありません`
+* launchd から実行すると、ログインシェルとは `PATH` が違います。`.env` に絶対パスを書いてください。
+  ```bash
+  # .env
+  COMPOSE_CLAUDE_BIN=/opt/homebrew/bin/claude
+  ```
+* 場所は `which claude` で確認できます。**見つからないときに別の方法へ勝手に切り替えることはしません**
+  （黙って品質が落ちた状態で配信し続けないため）。
+
+### ❌ 終了コード 3 や 4 で終わる
+* **3** = 生成結果を検証で落とし、その回の投稿を見送った（30分後にやり直します）。
+* **4** = 設定・入出力の誤り（やり直しても直りません）。メッセージのとおりに `endpoints.yml` や `.env` を直してください。
+
 ---
 
 *Developed with ❤️ for webex-news-rss-bot*
@@ -1822,6 +1963,7 @@ For laptops in clamshell mode on battery, wake is impossible. On travel days, ma
 
 | Version | 日付 | 何をしたか |
 |:---|:---|:---|
+| **v4.27.0** | 2026-09-20 | 配信を**収集→生成→投稿の3段**に分けられるようにした（`--pipeline` / `--emit-candidates` / `--compose` / `--post-from`）。記事の選定と要約を、API 課金ではなく **Claude Code などのコマンド**に任せられる（`endpoints.yml` の `compose:` で選ぶ。指示は `compose_select.md` / `compose_summarize.md`）。生成結果は収集時のデータを正本に**検証してから投稿**し、通らなければ見送って30分後にやり直す（配信時刻＋2時間を過ぎたら AI なしの簡易モードで配信し、投稿の末尾に印を出す）。**不具合修正**: RSS の概要が文の途中で切れている記事（実測45件中10件）を「そのまま出せる」と判定しており、尻切れの文章を投稿していた。**フラグを付けない実行はこれまでと同じ挙動です。** |
 | **v4.26.0** | 2026-09-10 | 配信前に**ネットワークの疎通確認**（DNS が引けるか＋HTTP 応答）を行うようにした。確認先は `endpoints.yml` の `healthcheck:` に外出し。繋がっていなければ配信を見送り、**30分後にやり直す**（予約を毎時から30分ごとへ変更）。無線が切れている朝に配信が丸ごと落ちるのを防ぐ。 |
 | **v4.25.0** | 2026-08-29 | 配信失敗への耐性を追加。送信を最大3回やり直し、1件も送れなかった日は「配信済み」にせず次の30分ごとのチェックで再試行する。実行中に Mac が寝て名前解決が壊れるのを `caffeinate` で防止。`.env` のスペースID をコメントアウトして**チャンネル単位で一時停止**できることを明記。 |
 | **v4.24.0** | 2026-08-25 | 定時実行を**タイムゾーンに一切依存しない**作りに変更。予約は30分ごとに固定し、配信するかどうかは実行時に日本時間で判断する。launchd がカレンダー計算と起動プロセスで別のタイムゾーンを使う Mac があり、ローカル時刻を計算して予約する方式（v4.15.0）が当てにならなかったため。 |
