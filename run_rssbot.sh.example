@@ -126,6 +126,17 @@ if [ "$status" -eq 3 ] && [ "$((10#$JST_HOUR))" -ge "$FALLBACK_HOUR" ]; then
     status=$?
 fi
 
+# 終了コード 4 = 設定や入出力の誤り。やり直しても直らないので待っても無駄だが、
+# 簡易モードは壊れている部分（生成系の設定）に依存しないため、一度だけ試す。
+# 無配信で1日を空けるより、印の付いた簡易モードで届けるほうがよい。
+if [ "$status" -eq 4 ]; then
+    echo "[run_rssbot] 設定または入出力の誤り（status=4）。簡易モードでの配信を試みます" >> "$LOG_FILE"
+    $KEEP_AWAKE "$TARGET_DIR/bin/python" "$TARGET_DIR/webex-news-rss-bot.py" \
+        --post-from "$COMPOSE_DIR" --llm-mode none \
+        >> "$LOG_FILE" 2>> "$ERR_FILE"
+    status=$?
+fi
+
 # 中間ファイルの掃除。7日より古い run のディレクトリだけを消す
 # （-mindepth 1 が無いと log/compose 自体が対象になり、新しい run まで消える）。
 if [ -d "$LOG_DIR/compose" ]; then

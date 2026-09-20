@@ -2318,11 +2318,18 @@ def _compose_executable(backend: str, spec: dict) -> str:
         return override
     command = str(spec.get("command") or "").strip()
     found = shutil.which(command) if command else ""
-    if not found:
-        raise ComposeSetupError(
-            f"バックエンド {backend} は利用できません: コマンド '{command}' が PATH に"
-            f"ありません。{bin_env or 'COMPOSE_*_BIN'} に絶対パスを設定してください。")
-    return found
+    if found:
+        return found
+    # launchd の PATH は /usr/bin:/bin:/usr/sbin:/sbin だけなので、
+    # よくあるインストール先を順に探す（endpoints.yml の search_paths）。
+    for directory in spec.get("search_paths") or []:
+        candidate = Path(str(directory)).expanduser() / command
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    searched = "、".join(str(d) for d in (spec.get("search_paths") or [])) or "（指定なし）"
+    raise ComposeSetupError(
+        f"バックエンド {backend} は利用できません: コマンド '{command}' が PATH にも "
+        f"{searched} にもありません。{bin_env or 'COMPOSE_*_BIN'} に絶対パスを設定してください。")
 
 
 def _cli_is_error(stdout: str) -> bool | None:
