@@ -39,3 +39,42 @@ healthcheck:
     expect: [200]
   - url: https://webexapis.com/v1/ping  # 実際の投稿先（認証なしでも 200 が返る）
     expect: [200]
+
+compose:
+  # 「収集 → 生成 → 投稿」の3段分割（--pipeline）で、選定と要約を担う実行系。
+  #   kind: cli … 手元のコマンドを起動する（サブスクリプションの枠で動く）
+  #   kind: api … 既存の要約と同じ HTTP API を呼ぶ（従量課金）
+  # どれを使っても同じ指示ファイル（compose_select.md / compose_summarize.md）と
+  # 同じ JSON の契約（selected.json / composed.json）で動く。
+  # コマンドの場所は bin_env の環境変数（.env）で上書きできる。
+  #
+  # search_paths について:
+  #   launchd から起動されるとき PATH は /usr/bin:/bin:/usr/sbin:/sbin だけになり、
+  #   ~/.local/bin や /opt/homebrew/bin は入らない。PATH で見つからなかったときは
+  #   ここに挙げたディレクトリを順に探す。`~` は実行ユーザのホームに展開する。
+  default: claude
+  backends:
+    claude:
+      kind: cli
+      command: claude
+      bin_env: COMPOSE_CLAUDE_BIN          # .env で絶対パスを上書きできる
+      search_paths: ["~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+      token_env: CLAUDE_CODE_OAUTH_TOKEN
+      # API キーが環境にあると従量課金の API を使ってしまうため、渡す前に外す
+      drop_env: [ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY]
+      default_model: sonnet
+      args: ["-p", "{prompt}", "--model", "{model}", "--fallback-model", "opus",
+             "--safe-mode", "--allowedTools", "Read,Write",
+             "--disallowedTools", "Bash,Edit,WebFetch,WebSearch,Task",
+             "--permission-mode", "acceptEdits", "--no-session-persistence",
+             "--output-format", "json"]
+    codex:
+      kind: cli
+      command: codex
+      bin_env: COMPOSE_CODEX_BIN
+      search_paths: ["~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+      default_model: gpt-5
+      args: ["exec", "{prompt}"]
+    anthropic: {kind: api, provider: anthropic, default_model: claude-haiku-4-5-20251001}
+    openai:    {kind: api, provider: openai,    default_model: gpt-5-mini}
+    gemini:    {kind: api, provider: gemini,    default_model: gemini-2.5-flash}

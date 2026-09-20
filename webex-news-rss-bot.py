@@ -27,13 +27,19 @@ import yaml
 import random
 import re
 import unicodedata
+import hashlib
+import html
+import shutil
+import subprocess
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
-from endpoints import get_endpoint  # 外部APIの宛先は endpoints.yml から読む
+from endpoints import get_endpoint, load_endpoints  # 外部APIの宛先は endpoints.yml から読む
 
 # --- 環境変数の読み込み / Load environment variables ---
 # override=True: シェル側に空文字などで既存セットされていても .env の値で上書きする。
@@ -372,6 +378,77 @@ def call_llm(prompt: str, api_key: str, model: str, max_tokens: int = 140,
     return data["content"][0]["text"].strip()
 
 
+# --- 記事の同定と概要の下ごしらえ / Entry identity and summary helpers ---
+# 収集→生成→投稿を分けて動かすとき、記事は「リンクから作った短いID」で受け渡す。
+# 生成側（Claude Code / API）にはURLを渡さないため、IDが記事の唯一の識別子になる。
+
+SKIP_API_MAX_CHARS = 100      # これ以下なら「既に短い」とみなす（SKIP-API 判定）
+FALLBACK_SUMMARY_CHARS = 110  # LLM を使わないときに原文を切り詰める長さ
+# RSS の概要に残りがちな HTML エンティティ。1つでもあれば整形が要る＝そのままは使わない。
+HTML_ENTITIES = ("&nbsp;", "&gt;", "&lt;", "&quot;", "&amp;")
+# ひらがな/カタカナ/漢字。1文字も無ければ「英文（または非日本語）」とみなす。
+_JP_CHARS_RE = re.compile(r'[ぁ-んァ-ヶー一-龯]')
+# 文が終わっている印。RSS が途中で切った概要を素通りさせないために見る。
+_SENTENCE_END = ("。", "！", "？", ".", "!", "?", "」")
+
+
+def _entry_id(link: str) -> str:
+    """リンクから決定的な短いIDを作る。同じ記事なら毎回同じIDになる。"""
+    return hashlib.sha1((link or "").encode("utf-8")).hexdigest()[:8]
+
+
+def _entry_to_json(entry: dict) -> dict:
+    """記事1件を JSON に書ける形へ変換する（published を ISO8601 文字列に）。"""
+    out = dict(entry)
+    published = out.get("published")
+    if isinstance(published, datetime.datetime):
+        out["published"] = published.isoformat()
+    return out
+
+
+def _entry_from_json(data: dict) -> dict:
+    """_entry_to_json の逆変換（published を datetime に戻す）。"""
+    out = dict(data)
+    published = out.get("published")
+    if isinstance(published, str) and published:
+        try:
+            out["published"] = datetime.datetime.fromisoformat(published)
+        except ValueError:
+            # 日時が壊れている記事だけを落とさず、収集時刻に寄せて配信を続ける
+            print(f"  [WARN] 公開日時を読めませんでした（{published}）。現在時刻として扱います")
+            out["published"] = datetime.datetime.now(datetime.timezone.utc)
+    return out
+
+
+def _is_summary_already_clean(raw: str) -> bool:
+    """RSS の概要が「そのまま出せる日本語」かを判定する（要約をかけるかの分かれ目）。
+
+    条件: 短い / 途中で切れていない / HTML エンティティが無い / 日本語を含む /
+    文末が句点などで終わっている。
+
+    最後の「文末」条件は v4.27.0 で追加した。RSS 側が文の途中で概要を切っている記事が
+    あり（実測 45 件中 10 件）、それを素通りさせると尻切れの文章がそのまま投稿されていた。
+    """
+    text = (raw or "").strip()
+    is_short = len(text) <= SKIP_API_MAX_CHARS
+    is_complete = not (
+        text.endswith("...") or text.endswith("…") or "続き" in text or "more" in text.lower()
+    )
+    is_clean = not any(entity in text for entity in HTML_ENTITIES)
+    is_japanese = bool(_JP_CHARS_RE.search(text))
+    ends_sentence = text.endswith(_SENTENCE_END)
+    return is_short and is_complete and is_clean and is_japanese and ends_sentence
+
+
+def _fallback_summary(raw: str) -> str:
+    """LLM を使わずに原文の概要を整える（実体参照の復元・空白圧縮・長さの切り詰め）。"""
+    text = html.unescape(raw or "")
+    text = re.sub(r"\s+", " ", text.replace("\n", " ")).strip()
+    if len(text) > FALLBACK_SUMMARY_CHARS:
+        text = text[:FALLBACK_SUMMARY_CHARS] + "…"
+    return text
+
+
 def summarize_with_claude(title: str, summary: str, api_key: str, model: str = "claude-3-haiku-20240307", is_advisory: bool = False) -> str:
     """
     Claude API を使用して記事を要約します。
@@ -430,14 +507,13 @@ def summarize_entries_in_place(entries: list[dict], api_key: str, cache: dict, m
             continue
             
         raw_sum = entry["summary"].strip()
-        is_short = len(raw_sum) <= 100
-        is_complete = not (raw_sum.endswith("...") or raw_sum.endswith("…") or "続き" in raw_sum or "more" in raw_sum.lower())
-        is_clean = not any(entity in raw_sum for entity in ["&nbsp;", "&gt;", "&lt;", "&quot;", "&amp;"])
         # ひらがな/カタカナ/漢字を1文字も含まなければ「英文(または非日本語)」と判定。
         # この場合は短くてもClaudeに渡して日本語へ翻訳要約させる。
-        is_japanese = bool(re.search(r'[ぁ-んァ-ヶー一-龯]', raw_sum))
+        is_japanese = bool(_JP_CHARS_RE.search(raw_sum))
 
-        if is_short and is_complete and is_clean and is_japanese:
+        # SKIP-API 判定の正本は _is_summary_already_clean()。3段分割（--pipeline）側の
+        # needs_summary と同じ条件を使い、判定が2か所にぶれないようにする。
+        if _is_summary_already_clean(raw_sum):
             # 日本語かつ既に十分に短く綺麗な文章の場合は、APIコールをせずそのまま採用して節約
             print(f"      [SKIP-API] 概要が既に短く綺麗な日本語です: {entry['title'][:25]}...")
             cache[link] = raw_sum
@@ -2107,6 +2183,852 @@ def send_digest(
 
 
 # ===========================================================
+# 収集 → 生成 → 投稿 の3段分割 / Collect → compose → post pipeline
+# ===========================================================
+#
+# 1回の配信を3つの段に分け、中間ファイル（log/compose/<run_id>/）で受け渡す。
+#   収集 : RSS を集めてチャンネル別の候補を作る  → state.json / candidates.json
+#   生成 : 候補から「選定」と「要約」を作る      → selected.json / composed.json
+#   投稿 : 生成結果を検証して Webex へ送る       → validation.json
+#
+# 生成を担うのは Claude Code CLI・codex CLI・各社 API のいずれか（endpoints.yml の
+# compose: で選ぶ）。どれを使っても同じ指示ファイル・同じ JSON の契約で動く。
+# 中間ファイルには Webex トークンや space ID を書かない。記事の URL も渡さない
+# （ドメインのみ）。生成側が参照できるのは、配信の判断に要る情報だけにする。
+
+COMPOSE_SCHEMA_VERSION = 1
+COMPOSE_POOL_LIMIT = 40          # 生成に渡す候補の上限（rerank_with_llm と同値）
+COMPOSE_MAX_CHARS = 110          # 要約の上限
+COMPOSE_TRUNCATE_LIMIT = 130     # これを超えたら修復せず原文採用
+COMPOSE_TRUNCATE_TO = 109        # 切り詰め後の長さ（「…」を足して110字）
+COMPOSE_HEADLINE_MAX_CHARS = 90  # これ未満かつ見出しの繰り返しなら「見出しだけ」とみなす
+COMPOSE_FAIL_RATIO_LIMIT = 0.3   # 要約の失格率がこれを超えたら run ごと見送る
+COMPOSE_TIMEOUT_DEFAULT = 900    # CLI バックエンドの制限時間（秒）
+COMPOSE_LOG_DIR = os.path.join(_BASE, "log", "compose")
+COMPOSE_READER_PROFILE = "日本の Cisco Systems の SE（ネットワーク／セキュリティ／AI の実務者）"
+
+# 終了コード（0/1/2 は delivery_exit_code() のまま）
+EXIT_COMPOSE_REJECTED = 3   # 生成結果を検証で落とし、投稿を見送った
+EXIT_SETUP_ERROR = 4        # 再試行しても直らない入出力・設定の誤り
+
+# 生成の2パス。指示ファイルはリポジトリ直下に置き、全バックエンドで共用する。
+COMPOSE_PASSES = (
+    {
+        "key": "select", "phase": "A", "label": "選定",
+        "instructions": "compose_select.md", "output": "selected.json",
+        "inputs": ("candidates.json",), "max_tokens": 1500,
+    },
+    {
+        "key": "summarize", "phase": "B", "label": "要約",
+        "instructions": "compose_summarize.md", "output": "composed.json",
+        "inputs": ("candidates.json", "selected.json"), "max_tokens": 8000,
+    },
+)
+
+# 要約の整形で落とすもの（検査 #8）
+_COMPOSE_PREFIXES = ("要約：", "要約:", "概要：", "概要:", "タイトル：", "Summary:", "この記事は")
+_COMPOSE_URL_RE = re.compile(r'https?://|www\.', re.IGNORECASE)
+_COMPOSE_MD_LINK_RE = re.compile(r'!?\[([^\]]*)\]\([^)]*\)')
+_COMPOSE_ZERO_WIDTH_RE = re.compile('[​-‏‪-‮﻿]')
+
+
+class ComposeError(RuntimeError):
+    """生成または検証に失敗した（投稿を見送る。終了コード 3）。"""
+
+
+class ComposeSetupError(ComposeError):
+    """設定・入出力の誤り（やり直しても直らない。終了コード 4）。"""
+
+
+@dataclass
+class ComposeResult:
+    """生成1回分の結果。detail には失敗理由（秘密情報を含めない）を入れる。"""
+    ok: bool
+    backend: str
+    model: str
+    detail: str = ""
+    elapsed: float = 0.0
+
+
+def load_compose_config() -> dict:
+    """endpoints.yml の compose: 節を読む。
+
+    get_endpoint() は2階層のURL専用なので、こちらは節をそのまま辞書で受け取る。
+    どのバックエンドをどう起動するかはコードに直書きせず、この節だけで決まる。
+    """
+    data = load_endpoints().get("compose")
+    if not isinstance(data, dict) or not isinstance(data.get("backends"), dict):
+        raise ComposeSetupError(
+            "endpoints.yml に compose: 節がありません。"
+            "生成バックエンドの定義（compose.backends）を追加してください。")
+    return data
+
+
+def resolve_compose_backend(name: str = "") -> tuple[str, dict]:
+    """使うバックエンド名とその定義を返す。未指定なら compose.default。"""
+    config = load_compose_config()
+    backend = (name or str(config.get("default") or "")).strip()
+    backends = config["backends"]
+    if not backend:
+        raise ComposeSetupError("endpoints.yml の compose.default が空です。")
+    spec = backends.get(backend)
+    if not isinstance(spec, dict):
+        raise ComposeSetupError(
+            f"バックエンド '{backend}' は endpoints.yml の compose.backends にありません。"
+            f"（定義済み: {', '.join(sorted(backends))}）")
+    return backend, spec
+
+
+def compose_instructions(file_name: str) -> str:
+    """指示ファイル（compose_select.md / compose_summarize.md）を読む。"""
+    path = Path(_BASE) / file_name
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ComposeSetupError(f"指示ファイルを読めません: {path.name}（{exc}）") from exc
+    if not text:
+        raise ComposeSetupError(f"指示ファイルが空です: {path.name}")
+    return text
+
+
+def _compose_env(spec: dict) -> dict[str, str]:
+    """CLI バックエンドに渡す環境変数を作る。
+
+    drop_env のキーを落とすのは、API キーが環境にあると CLI がサブスクリプションでは
+    なく従量課金の API を使ってしまうため。token_env は素通しする（値は扱わない）。
+    """
+    env = dict(os.environ)
+    for key in spec.get("drop_env") or []:
+        env.pop(str(key), None)
+    token_env = str(spec.get("token_env") or "")
+    if token_env and not env.get(token_env):
+        print(f"    [INFO] {token_env} は未設定です（CLI 側のログイン状態で実行します）")
+    return env
+
+
+def _compose_executable(backend: str, spec: dict) -> str:
+    """CLI の実体を解決する。見つからなければ止める（黙って劣化させない）。"""
+    bin_env = str(spec.get("bin_env") or "")
+    override = os.getenv(bin_env, "").strip() if bin_env else ""
+    if override:
+        if not Path(override).exists():
+            raise ComposeSetupError(
+                f"バックエンド {backend} は利用できません: {bin_env} が指す "
+                f"{override} が見つかりません。")
+        return override
+    command = str(spec.get("command") or "").strip()
+    found = shutil.which(command) if command else ""
+    if found:
+        return found
+    # launchd の PATH は /usr/bin:/bin:/usr/sbin:/sbin だけなので、
+    # よくあるインストール先を順に探す（endpoints.yml の search_paths）。
+    for directory in spec.get("search_paths") or []:
+        candidate = Path(str(directory)).expanduser() / command
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    searched = "、".join(str(d) for d in (spec.get("search_paths") or [])) or "（指定なし）"
+    raise ComposeSetupError(
+        f"バックエンド {backend} は利用できません: コマンド '{command}' が PATH にも "
+        f"{searched} にもありません。{bin_env or 'COMPOSE_*_BIN'} に絶対パスを設定してください。")
+
+
+def _cli_is_error(stdout: str) -> bool | None:
+    """--output-format json の is_error を読む。判定できなければ None。
+
+    終了コードだけに頼らない（パイプに繋ぐと取りこぼす）ため、こちらを成否の正本にする。
+    """
+    text = (stdout or "").strip()
+    if not text:
+        return None
+    for candidate in (text, text[text.find("{"):text.rfind("}") + 1] if "{" in text else ""):
+        if not candidate:
+            continue
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict) and "is_error" in data:
+            return bool(data["is_error"])
+    return None
+
+
+def _compose_output_ok(work_dir: Path, pass_def: dict) -> str:
+    """生成物が書かれ、JSON として読めるかを確かめる。問題があれば理由を返す。"""
+    path = work_dir / pass_def["output"]
+    if not path.exists():
+        return f"{pass_def['output']} が作られませんでした"
+    try:
+        json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return f"{pass_def['output']} を読めません（{exc}）"
+    return ""
+
+
+def _run_compose_cli(work_dir: Path, backend: str, spec: dict, model: str,
+                     timeout: int, pass_def: dict) -> ComposeResult:
+    """CLI バックエンド（claude / codex）を1パス分だけ起動する。
+
+    生成物は CLI 自身が work_dir に書く。こちらは起動・成否判定・後片付けだけを行う。
+    """
+    executable = _compose_executable(backend, spec)
+    prompt = compose_instructions(pass_def["instructions"])
+    template = spec.get("args") or []
+    if not template:
+        raise ComposeSetupError(f"バックエンド {backend} に args がありません（endpoints.yml）")
+    argv = [executable] + [
+        str(a).replace("{prompt}", prompt).replace("{model}", model) for a in template
+    ]
+
+    started = time.time()
+    try:
+        proc = subprocess.run(  # noqa: S603  実行するコマンドは endpoints.yml で定義済み
+            argv, cwd=str(work_dir), env=_compose_env(spec),
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ComposeResult(False, backend, model,
+                             f"{pass_def['label']}が {timeout} 秒で終わりませんでした",
+                             time.time() - started)
+    except OSError as exc:
+        raise ComposeSetupError(
+            f"バックエンド {backend} を起動できません: {exc}") from exc
+    elapsed = time.time() - started
+
+    is_error = _cli_is_error(proc.stdout)
+    failed = is_error if is_error is not None else (proc.returncode != 0)
+    if failed:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+        detail = f"{pass_def['label']}に失敗（exit={proc.returncode}）: {' / '.join(tail)[:300]}"
+        return ComposeResult(False, backend, model, detail, elapsed)
+
+    problem = _compose_output_ok(work_dir, pass_def)
+    if problem:
+        return ComposeResult(False, backend, model, f"{pass_def['label']}: {problem}", elapsed)
+    return ComposeResult(True, backend, model, "", elapsed)
+
+
+def _strip_code_fence(text: str) -> str:
+    """応答から ```json … ``` の囲みを外し、最初の JSON オブジェクトだけを残す。"""
+    body = (text or "").strip()
+    if body.startswith("```"):
+        body = re.sub(r'^```[a-zA-Z]*\s*', "", body)
+        body = re.sub(r'```\s*$', "", body).strip()
+    start, end = body.find("{"), body.rfind("}")
+    return body[start:end + 1] if 0 <= start < end else body
+
+
+def _run_compose_api(work_dir: Path, backend: str, spec: dict, model: str,
+                     pass_def: dict) -> ComposeResult:
+    """API バックエンド（anthropic / openai / gemini）を1パス分だけ呼ぶ。
+
+    CLI と違ってファイルを読めないので、同じ指示ファイルの本文に入力 JSON を添えて送り、
+    返ってきた文字列をこちらで JSON として解釈して同じ契約のファイルに書く。
+    """
+    provider = str(spec.get("provider") or backend)
+    api_key = llm_api_key(provider)
+    if not api_key:
+        raise ComposeSetupError(
+            f"バックエンド {backend} は利用できません: {LLM_KEY_ENV.get(provider, 'APIキー')} が"
+            "設定されていません（.env を確認してください）。")
+
+    parts = [compose_instructions(pass_def["instructions"]),
+             "\n## 入力（作業ディレクトリのファイルの内容）\n"]
+    for name in pass_def["inputs"]:
+        try:
+            parts.append(f"### {name}\n{(work_dir / name).read_text(encoding='utf-8')}")
+        except OSError as exc:
+            raise ComposeSetupError(f"{name} を読めません（{exc}）") from exc
+    parts.append(f"\n{pass_def['output']} に書くべき JSON だけを出力してください。"
+                 "説明文・コードフェンスは書かないでください。")
+    prompt = "\n".join(parts)
+
+    started = time.time()
+    try:
+        text = call_llm(prompt, api_key, model,
+                        max_tokens=int(pass_def["max_tokens"]), provider=provider)
+    except (requests.exceptions.RequestException, KeyError, IndexError, ValueError) as exc:
+        return ComposeResult(False, backend, model,
+                             f"{pass_def['label']}の API 呼び出しに失敗: {exc}",
+                             time.time() - started)
+    elapsed = time.time() - started
+
+    try:
+        data = json.loads(_strip_code_fence(text))
+    except (json.JSONDecodeError, ValueError) as exc:
+        return ComposeResult(False, backend, model,
+                             f"{pass_def['label']}の応答が JSON ではありません（{exc}）", elapsed)
+    try:
+        (work_dir / pass_def["output"]).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise ComposeSetupError(f"{pass_def['output']} を書けません（{exc}）") from exc
+    return ComposeResult(True, backend, model, "", elapsed)
+
+
+def run_compose(work_dir: Path, backend: str = "", model: str = "",
+                timeout: int = COMPOSE_TIMEOUT_DEFAULT) -> ComposeResult:
+    """候補から selected.json / composed.json を作る（選定→要約の2パス）。
+
+    バックエンドの種類（CLI / API）に関わらず、入出力の契約は同じ。
+    設定の誤りは ComposeSetupError（終了コード4）、生成の失敗は戻り値で返す。
+    """
+    name, spec = resolve_compose_backend(backend)
+    kind = str(spec.get("kind") or "").strip().lower()
+    use_model = (model or str(spec.get("default_model") or "")).strip()
+    if kind not in ("cli", "api"):
+        raise ComposeSetupError(
+            f"バックエンド {name} の kind は cli か api にしてください（現在: '{kind}'）")
+
+    print(f"--- 生成 / compose（バックエンド: {name} / モデル: {use_model or '既定'}）---")
+    total = 0.0
+    for pass_def in COMPOSE_PASSES:
+        print(f"  ▶ パス{pass_def['phase']}: {pass_def['label']} → {pass_def['output']}")
+        if kind == "cli":
+            result = _run_compose_cli(work_dir, name, spec, use_model, timeout, pass_def)
+        else:
+            result = _run_compose_api(work_dir, name, spec, use_model, pass_def)
+        total += result.elapsed
+        if not result.ok:
+            print(f"  [ERROR] {result.detail}")
+            result.elapsed = total
+            return result
+        print(f"    完了（{result.elapsed:.1f} 秒）")
+    return ComposeResult(True, name, use_model, "", total)
+
+
+def compose_cat_label(channel: dict) -> str:
+    """チャンネルのカテゴリ表示名（見出しに出すものと同じ）。"""
+    categories = channel.get("categories") or []
+    if (channel.get("source_feeds") or []) and not categories:
+        return "Cisco Security Advisories（RSS 専用）"
+    return "、".join(categories) if categories else "全カテゴリ"
+
+
+def _state_entry(entry: dict) -> dict:
+    """記事1件を state.json に書く形へ落とす（URL はここだけに残す）。"""
+    return _entry_to_json({
+        "id": _entry_id(entry.get("link") or ""),
+        "title": entry.get("title") or "",
+        "link": entry.get("link") or "",
+        "published": entry.get("published"),
+        "summary": (entry.get("summary") or "").strip(),
+        "fallback": bool(entry.get("fallback")),
+        "source_feed": entry.get("source_feed") or "",
+        "_score": entry.get("_score", 0),
+    })
+
+
+def build_pipeline_state(run_id: str, now_jst: datetime.datetime, run_args: dict,
+                         active_channels: list[dict],
+                         channel_filtered: dict[str, list[dict]],
+                         digest_channel_names: list[str]) -> dict:
+    """収集の結果（チャンネル別の候補）を state.json の形にまとめる。
+
+    候補は 40 件でカットせず全量入れる。投稿段はこのファイルを正本として突き合わせる
+    ため、生成側が知らない記事まで含めて「その日集まったもの」を丸ごと残す。
+    """
+    channels = []
+    for ch in active_channels:
+        name = ch.get("name", "Unnamed")
+        entries = channel_filtered.get(name) or []
+        channels.append({
+            "name": name,
+            "cat_label": compose_cat_label(ch),
+            "max_items": max_items_of(ch),
+            "is_digest": False,
+            "entries": [_state_entry(e) for e in entries],
+        })
+    return {
+        "schema_version": COMPOSE_SCHEMA_VERSION,
+        "run_id": run_id,
+        "now_jst": now_jst.isoformat(),
+        "run_args": run_args,
+        "channels": channels,
+        "digest": {"channel_names": list(digest_channel_names)},
+    }
+
+
+def _is_headline_only(title: str, raw_summary: str) -> bool:
+    """概要が「見出しの繰り返しだけ」で、本文にあたる情報が無いかを判定する。"""
+    text = (raw_summary or "").strip()
+    if not text:
+        return True
+    head = (title or "").strip()[:20]
+    return len(text) < COMPOSE_HEADLINE_MAX_CHARS and bool(head) and head in text
+
+
+def _candidate_item(entry: dict) -> dict:
+    """記事1件を candidates.json の items の形にする（URL は渡さずドメインだけ）。"""
+    raw = (entry.get("summary") or "").strip()
+    published = entry.get("published")
+    link = entry.get("link") or ""
+    jst = datetime.timezone(datetime.timedelta(hours=9))
+    return {
+        "title": entry.get("title") or "",
+        "domain": urlparse(link).netloc,
+        "published_jst": published.astimezone(jst).strftime("%Y-%m-%d %H:%M") if published else "",
+        "score": entry.get("_score", 0),
+        "is_advisory": "/CiscoSecurityAdvisory/" in link,
+        "needs_summary": not _is_summary_already_clean(raw),
+        "body_is_headline_only": _is_headline_only(entry.get("title") or "", raw),
+        "raw_summary": raw,
+    }
+
+
+def build_candidates(state: dict) -> dict:
+    """state.json から candidates.json（生成側へ渡す入力）を作る。
+
+    候補はチャンネルごとにスコア降順→公開日時降順の先頭 COMPOSE_POOL_LIMIT 件まで。
+    """
+    items: dict[str, dict] = {}
+    channels: list[dict] = []
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+    for ch in state.get("channels") or []:
+        if ch.get("is_digest"):
+            continue
+        entries = [_entry_from_json(e) for e in ch.get("entries") or []]
+        if not entries:
+            continue
+        # rerank_with_llm と同じ並び: スコア降順 → 公開日時降順
+        ordered = sorted(
+            entries,
+            key=lambda e: (e.get("_score", 0), e.get("published") or epoch),
+            reverse=True,
+        )[:COMPOSE_POOL_LIMIT]
+
+        ids: list[str] = []
+        for entry in ordered:
+            eid = entry["id"]
+            ids.append(eid)
+            if eid not in items:
+                items[eid] = _candidate_item(entry)
+        channels.append({
+            "channel": ch.get("name", "Unnamed"),
+            "cat_label": ch.get("cat_label") or ch.get("name", ""),
+            "select_count": min(len(ids), int(ch.get("max_items") or MAX_ITEMS_DEFAULT)),
+            "advisory_channel": bool(ids) and all(items[i]["is_advisory"] for i in ids),
+            "candidate_ids": ids,
+        })
+
+    return {
+        "schema_version": COMPOSE_SCHEMA_VERSION,
+        "run_id": state.get("run_id", ""),
+        "reader_profile": COMPOSE_READER_PROFILE,
+        "summary_rules": {
+            "language": "ja",
+            "max_chars": COMPOSE_MAX_CHARS,
+            "max_sentences": 2,
+            "forbid": ["ラベル/前置き", "改行", "情報不足の要求", "URL", "Markdown記法", "CVSS の数値"],
+        },
+        "items": items,
+        "channels": channels,
+    }
+
+
+def _write_json(path: Path, data: dict) -> None:
+    """中間ファイルを1つ書く。書けなければ設定・入出力の誤りとして止める。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise ComposeSetupError(f"{path.name} を書けません（{exc}）") from exc
+
+
+def _read_json(path: Path, label: str, missing_is_setup_error: bool = False) -> dict:
+    """中間ファイルを1つ読む（検査 #1: 存在・パース可）。
+
+    missing_is_setup_error=True は「収集の成果物が無い」場合に使う。やり直しても
+    現れないので設定・入出力の誤り（終了コード4）として扱う。生成の成果物が無い場合は
+    生成に失敗したということなので、投稿を見送る（終了コード3）。
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        if missing_is_setup_error:
+            raise ComposeSetupError(f"{label} がありません: {path}") from exc
+        raise ComposeError(f"{label} がありません: {path}") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ComposeSetupError(f"{label} を読めません: {path}（{exc}）") from exc
+    except json.JSONDecodeError as exc:
+        raise ComposeError(f"{label} が JSON として壊れています: {path}（{exc}）") from exc
+    if not isinstance(data, dict):
+        raise ComposeError(f"{label} の形式が正しくありません（マップである必要があります）: {path}")
+    if data.get("schema_version") != COMPOSE_SCHEMA_VERSION:
+        raise ComposeError(
+            f"{label} の schema_version が {COMPOSE_SCHEMA_VERSION} ではありません"
+            f"（{data.get('schema_version')}）: {path}")
+    return data
+
+
+def emit_intermediate(out_dir: Path, state: dict, candidates: dict) -> None:
+    """state.json と candidates.json を書き出す。"""
+    _write_json(out_dir / "state.json", state)
+    _write_json(out_dir / "candidates.json", candidates)
+    total = sum(len(ch.get("entries") or []) for ch in state.get("channels") or [])
+    print(f"  中間ファイルを書き出しました: {out_dir}")
+    print(f"    state.json      : {len(state.get('channels') or [])} チャンネル / {total} 件")
+    print(f"    candidates.json : {len(candidates.get('items') or {})} 件 / "
+          f"{len(candidates.get('channels') or [])} チャンネル")
+
+
+def load_pipeline_inputs(work_dir: Path) -> tuple[dict, dict]:
+    """state.json と candidates.json を読み、run_id の一致を確かめる（検査 #2）。"""
+    state = _read_json(work_dir / "state.json", "state.json", missing_is_setup_error=True)
+    candidates = _read_json(work_dir / "candidates.json", "candidates.json",
+                            missing_is_setup_error=True)
+    if state.get("run_id") != candidates.get("run_id"):
+        raise ComposeError(
+            f"candidates.json の run_id が state.json と一致しません"
+            f"（{candidates.get('run_id')} / {state.get('run_id')}）")
+    return state, candidates
+
+
+def load_compose_outputs(work_dir: Path, run_id: str) -> tuple[dict, dict]:
+    """selected.json と composed.json を読む（検査 #1 / #2）。
+
+    run_id が違うファイルは、前日の生成物を掴んだということなので run ごと落とす。
+    """
+    selected = _read_json(work_dir / "selected.json", "selected.json")
+    composed = _read_json(work_dir / "composed.json", "composed.json")
+    for label, data in (("selected.json", selected), ("composed.json", composed)):
+        if data.get("run_id") != run_id:
+            raise ComposeError(
+                f"{label} の run_id が state.json と一致しません"
+                f"（{data.get('run_id')} / {run_id}）。別の実行の生成物です。")
+    return selected, composed
+
+
+def _normalize_summary(text: str) -> str:
+    """要約を整える（検査 #8）。改行・接頭辞・コードフェンス・制御文字・ゼロ幅を落とす。"""
+    out = _COMPOSE_ZERO_WIDTH_RE.sub("", text or "")
+    out = out.replace("```json", "").replace("```", "")
+    out = "".join(ch for ch in out if ch == "\n" or unicodedata.category(ch)[0] != "C")
+    out = re.sub(r'\s+', " ", out.replace("\n", " ")).strip()
+    out = _COMPOSE_MD_LINK_RE.sub(r'\1', out)
+    for prefix in _COMPOSE_PREFIXES:
+        if out.startswith(prefix):
+            out = out[len(prefix):].lstrip("　 ")
+    return out.strip("　 \"'「」")
+
+
+def _check_summary(text: str) -> tuple[str | None, str]:
+    """要約1件を検査する（#9 URL / #10 長さ / #11 日本語）。
+
+    採用できるなら (整えた要約, 注記)、駄目なら (None, 理由) を返す。
+    """
+    out = _normalize_summary(text)
+    if not out:
+        return None, "空"
+    if _COMPOSE_URL_RE.search(out):                       # 検査 #9
+        return None, "URL を含む"
+    if not _JP_CHARS_RE.search(out):                      # 検査 #11
+        return None, "日本語を含まない"
+    if len(out) > COMPOSE_TRUNCATE_LIMIT:                 # 検査 #10
+        return None, f"{len(out)}字（上限の大幅超過）"
+    if len(out) > COMPOSE_MAX_CHARS:
+        return out[:COMPOSE_TRUNCATE_TO] + "…", f"{len(out)}字→切り詰め"
+    return out, ""
+
+
+def _new_validation_report(run_id: str) -> dict:
+    """検証結果の入れ物を作る。"""
+    return {
+        "schema_version": COMPOSE_SCHEMA_VERSION, "run_id": run_id,
+        "accepted": 0, "truncated": 0, "raw_fallback": 0, "missing": 0,
+        "dropped_ids": 0, "backfilled": 0, "channel_rescue": 0, "shared": 0,
+        "skip_api": 0, "fail_ratio": 0.0, "channels": {}, "notes": [],
+    }
+
+
+def restore_channel_entries(state: dict) -> dict[str, list[dict]]:
+    """state.json のチャンネル別候補を、配信に使える記事の辞書へ戻す。"""
+    restored: dict[str, list[dict]] = {}
+    for ch in state.get("channels") or []:
+        if ch.get("is_digest"):
+            continue
+        restored[ch.get("name", "Unnamed")] = [
+            _entry_from_json(e) for e in ch.get("entries") or []
+        ]
+    return restored
+
+
+def _finish_summary(text: str, link: str) -> str:
+    """Cisco Security Advisory は CVSS 表記を落とす（検査 #12。数値はバッジで出す）。"""
+    if "/CiscoSecurityAdvisory/" in (link or ""):
+        return _strip_cvss_mentions(text)
+    return text
+
+
+def _resolve_summary(eid: str, entry: dict, item: dict | None, summaries: dict,
+                     shared: dict[str, str], report: dict) -> str:
+    """記事1件の要約を決める（生成結果の採否と、原文へのフォールバック）。"""
+    raw = (item or {}).get("raw_summary") or entry.get("summary") or ""
+    link = entry.get("link") or ""
+
+    if item is not None and not item.get("needs_summary", True):
+        report["skip_api"] += 1
+        return _finish_summary(_fallback_summary(raw), link)
+    if eid in shared:                                     # 検査 #13
+        report["shared"] += 1
+        return shared[eid]
+
+    text = summaries.get(eid)
+    if not isinstance(text, str) or not text.strip():
+        report["raw_fallback"] += 1
+        report["missing"] += 1
+        report["notes"].append(f"{eid}: 要約が出力されていません → 原文を使います")
+        return _finish_summary(_fallback_summary(raw), link)
+
+    checked, note = _check_summary(text)
+    if checked is None:
+        report["raw_fallback"] += 1
+        report["notes"].append(f"{eid}: {note} → 原文を使います")
+        return _finish_summary(_fallback_summary(raw), link)
+
+    report["accepted"] += 1
+    if note:
+        report["truncated"] += 1
+    result = _finish_summary(checked, link)
+    shared[eid] = result
+    return result
+
+
+def _pick_channel_ids(cand: dict, selected_ids: list, entries: list[dict],
+                      report: dict) -> list[str]:
+    """1チャンネル分の選定を検証して確定する（検査 #3〜#7）。"""
+    name = cand.get("channel", "Unnamed")
+    pool = [str(i) for i in cand.get("candidate_ids") or []]
+    want = int(cand.get("select_count") or 0)
+
+    picked: list[str] = []
+    for raw_id in selected_ids or []:
+        eid = str(raw_id)
+        if eid not in pool:                               # 検査 #3
+            report["dropped_ids"] += 1
+            report["notes"].append(f"{name}: 候補にない id を破棄しました（{eid}）")
+            continue
+        if eid in picked:                                 # 検査 #4
+            report["dropped_ids"] += 1
+            continue
+        picked.append(eid)
+
+    if len(picked) > want:                                # 検査 #5
+        report["notes"].append(f"{name}: {len(picked)} 件 → {want} 件へ切り詰めました")
+        picked = picked[:want]
+    if not picked and want:                               # 検査 #7
+        report["channel_rescue"] += 1
+        report["notes"].append(f"{name}: 選定が空のため stratified_pick で代替しました")
+        picked = [e["id"] for e in stratified_pick(entries, want)]
+    for eid in pool:                                      # 検査 #6
+        if len(picked) >= want:
+            break
+        if eid not in picked:
+            picked.append(eid)
+            report["backfilled"] += 1
+    return picked[:want]
+
+
+def validate_and_apply(state: dict, candidates: dict, selected: dict,
+                       composed: dict) -> tuple[dict[str, list[dict]], dict]:
+    """生成結果を state.json と突き合わせて検証し、配信する記事を確定する。
+
+    信用するのは「id の並び」と「要約の文字列」だけ。タイトル・リンク・公開日時は
+    すべて state.json 側の値を使う（生成側が書き換えても配信には影響しない）。
+    失格率が COMPOSE_FAIL_RATIO_LIMIT を超えた場合は run ごと失敗させる（検査 #14）。
+    """
+    report = _new_validation_report(state.get("run_id", ""))
+    entries_by_channel = restore_channel_entries(state)
+    items = candidates.get("items") or {}
+    summaries = composed.get("summaries") or {}
+    shared: dict[str, str] = {}
+
+    sel_by_channel: dict[str, dict] = {}
+    for ch in selected.get("channels") or []:
+        if isinstance(ch, dict) and ch.get("channel"):
+            sel_by_channel.setdefault(str(ch["channel"]), ch)
+
+    result: dict[str, list[dict]] = {}
+    for cand in candidates.get("channels") or []:
+        name = str(cand.get("channel") or "Unnamed")
+        entries = entries_by_channel.get(name, [])
+        by_id = {e.get("id"): e for e in entries}
+        chosen: list[dict] = []
+        selected_ids = sel_by_channel.get(name, {}).get("selected_ids") or []
+        if name not in sel_by_channel:
+            report["notes"].append(f"{name}: selected.json にこのチャンネルがありません")
+        for eid in _pick_channel_ids(cand, selected_ids, entries, report):
+            source = by_id.get(eid)
+            if source is None:
+                report["dropped_ids"] += 1
+                continue
+            entry = dict(source)
+            entry["summary"] = _resolve_summary(
+                eid, entry, items.get(eid), summaries, shared, report)
+            chosen.append(entry)
+        result[name] = chosen
+        report["channels"][name] = len(chosen)
+
+    graded = report["accepted"] + report["raw_fallback"]
+    report["fail_ratio"] = round(report["raw_fallback"] / graded, 4) if graded else 0.0
+    if report["fail_ratio"] > COMPOSE_FAIL_RATIO_LIMIT:   # 検査 #14
+        raise ComposeError(
+            f"要約の失格率が {report['fail_ratio']:.0%} で上限"
+            f"（{COMPOSE_FAIL_RATIO_LIMIT:.0%}）を超えました。この run は投稿を見送ります。")
+    return result, report
+
+
+def build_simple_selection(state: dict) -> dict[str, list[dict]]:
+    """LLM を使わずに配信内容を組み立てる（簡易モード / --llm-mode none）。
+
+    選定は stratified_pick、要約は原文の整形のみ。生成が間に合わなかった日に、
+    何も届かないよりは見出しだけでも届ける、という位置づけ。
+    """
+    result: dict[str, list[dict]] = {}
+    for ch in state.get("channels") or []:
+        if ch.get("is_digest"):
+            continue
+        name = ch.get("name", "Unnamed")
+        max_items = int(ch.get("max_items") or MAX_ITEMS_DEFAULT)
+        entries = [_entry_from_json(e) for e in ch.get("entries") or []]
+        picked = stratified_pick(entries, max_items)
+        for entry in picked:
+            entry["summary"] = _finish_summary(
+                _fallback_summary(entry.get("summary") or ""), entry.get("link") or "")
+        result[name] = picked
+    return result
+
+
+def print_validation_report(report: dict) -> None:
+    """検証結果を1画面ぶんにまとめて表示する。"""
+    print(f"  採用 {report['accepted']} 件 / 切り詰め {report['truncated']} 件 / "
+          f"原文 {report['raw_fallback']} 件（うち欠落 {report['missing']} 件）/ "
+          f"SKIP-API {report['skip_api']} 件")
+    print(f"  破棄id {report['dropped_ids']} / 補充 {report['backfilled']} / "
+          f"チャンネル救済 {report['channel_rescue']} / 共有 {report['shared']} / "
+          f"失格率 {report['fail_ratio']:.1%}")
+    for note in report["notes"][:20]:
+        print(f"    - {note}")
+    if len(report["notes"]) > 20:
+        print(f"    …他 {len(report['notes']) - 20} 件（validation.json を参照）")
+
+
+# 非LLM経路（簡易モード）で配信した日は、投稿の末尾にこの印を出す。
+# 生成が静かに壊れたまま毎朝それらしい投稿が届く、という沈黙故障を見逃さないため。
+SIMPLE_MODE_MARKER = "⚠️ 本日は簡易モードで配信しています（AI による選定・要約は行っていません）"
+
+
+@dataclass
+class PipelineOutcome:
+    """3段分割の分岐の結果。main はこの中身だけを見て配信へ進む。"""
+    selection: dict | None = None      # チャンネル名 → 配信する記事（None なら現行のまま）
+    simple_mode: bool = False          # 非LLM経路で組み立てたか
+    all_entries: list | None = None    # ダイジェスト用に差し替える全記事（None なら現行のまま）
+
+
+def pipeline_mode_requested(args: argparse.Namespace) -> bool:
+    """3段分割のフラグが1つでも指定されたか（既定の実行では常に False）。"""
+    return bool(getattr(args, "pipeline", False) or getattr(args, "emit_candidates", "")
+                or getattr(args, "compose", "") or getattr(args, "post_from", ""))
+
+
+def _pipeline_run_args(args: argparse.Namespace, hours: int) -> dict:
+    """state.json に残す実行条件（秘密情報は入れない）。"""
+    return {
+        "hours": hours,
+        "fallback_items": args.fallback_items,
+        "weekend_catchup": bool(args.weekend_catchup),
+        "channels": list(getattr(args, "channel", None) or []),
+        "dry_run": bool(args.dry_run),
+        "llm_mode": args.llm_mode,
+    }
+
+
+def _compose_and_validate(work_dir: Path, state: dict, candidates: dict,
+                          args: argparse.Namespace) -> dict[str, list[dict]]:
+    """生成 → 検証 → 配信内容の確定。失敗は例外で返す（投稿はしない）。"""
+    result = run_compose(work_dir, args.compose_backend, args.compose_model,
+                         args.compose_timeout)
+    if not result.ok:
+        raise ComposeError(result.detail or "生成に失敗しました")
+    selected, composed = load_compose_outputs(work_dir, state.get("run_id", ""))
+    applied, report = validate_and_apply(state, candidates, selected, composed)
+    _write_json(work_dir / "validation.json", report)
+    print("--- 検証 / validation ---")
+    print_validation_report(report)
+    return applied
+
+
+def _post_from_stage(args: argparse.Namespace) -> PipelineOutcome:
+    """--post-from: 収集せず、書き出してある内容から配信内容を組み立てる。"""
+    work_dir = Path(args.post_from)
+    state, candidates = load_pipeline_inputs(work_dir)
+    print(f"--- 書き出し済みの内容から配信（run_id: {state.get('run_id', '')}）---")
+    # ダイジェストの時事枠は全記事を見るため、候補プールの和集合で代用する。
+    pooled: dict[str, dict] = {}
+    for entries in restore_channel_entries(state).values():
+        for entry in entries:
+            pooled.setdefault(entry.get("link") or entry.get("id", ""), entry)
+    all_entries = list(pooled.values())
+
+    if args.llm_mode == "none":
+        print("  [INFO] --llm-mode none: 選定は stratified_pick、要約は原文の整形のみ")
+        return PipelineOutcome(build_simple_selection(state), True, all_entries)
+
+    selected, composed = load_compose_outputs(work_dir, state.get("run_id", ""))
+    applied, report = validate_and_apply(state, candidates, selected, composed)
+    _write_json(work_dir / "validation.json", report)
+    print("--- 検証 / validation ---")
+    print_validation_report(report)
+    return PipelineOutcome(applied, False, all_entries)
+
+
+def run_pipeline_stage(args: argparse.Namespace, now_jst: datetime.datetime, hours: int,
+                       active_channels: list[dict],
+                       channel_filtered: dict[str, list[dict]],
+                       digest_channel_names: list[str]) -> PipelineOutcome:
+    """収集と配信の間に挟まる分岐。3段分割のフラグが指定されたときだけ呼ばれる。
+
+    ComposeSetupError（設定・入出力）と ComposeError（生成・検証）を送出する。
+    呼び出し側でそれぞれ終了コード 4 / 3 に変換する。
+    """
+    # --compose DIR: 既に書き出してある候補から生成だけを行う
+    if args.compose:
+        work_dir = Path(args.compose)
+        state, candidates = load_pipeline_inputs(work_dir)
+        _compose_and_validate(work_dir, state, candidates, args)
+        print("\n=== 生成のみで終了（投稿はしていません）===")
+        sys.exit(0)
+
+    if args.post_from:
+        return _post_from_stage(args)
+
+    # ここから先は収集済み。候補を中間ファイルに書き出す。
+    run_id = str(getattr(args, "run_id", "") or "").strip() or now_jst.strftime("%Y%m%d-%H%M%S")
+    state = build_pipeline_state(
+        run_id, now_jst, _pipeline_run_args(args, hours),
+        active_channels, channel_filtered, digest_channel_names,
+    )
+    candidates = build_candidates(state)
+    out_dir = (Path(args.emit_candidates) if args.emit_candidates
+               else Path(COMPOSE_LOG_DIR) / run_id)
+    print(f"\n--- 中間ファイルの書き出し（run_id: {run_id}）---")
+    emit_intermediate(out_dir, state, candidates)
+
+    if args.emit_candidates:
+        print("\n=== 収集のみで終了（投稿はしていません）===")
+        sys.exit(0)
+
+    if args.llm_mode == "none":
+        print("  [INFO] --llm-mode none: 選定は stratified_pick、要約は原文の整形のみ")
+        return PipelineOutcome(build_simple_selection(state), True)
+    if args.llm_mode == "api":
+        # 現行どおり process_channel 側で再ランク・要約を行う（中間ファイルは記録のみ）
+        return PipelineOutcome()
+    return PipelineOutcome(_compose_and_validate(out_dir, state, candidates, args))
+
+
+# ===========================================================
 # メイン処理 / Main
 # ===========================================================
 
@@ -2151,6 +3073,26 @@ def main() -> None:
                         help=f"収集するフィードの設定ファイル（デフォルト: {URLS_FILE}）")
     parser.add_argument("--channels-file", default=CHANNELS_FILE,
                         help=f"配信先チャンネルの設定ファイル（デフォルト: {CHANNELS_FILE}）")
+    # --- 収集 → 生成 → 投稿 の3段分割 / Collect → compose → post ---
+    # 何も指定しなければ従来どおり（収集から投稿までを1回で通し、要約は API で行う）。
+    parser.add_argument("--pipeline", action="store_true",
+                        help="収集→生成→投稿を1プロセスで通す（中間ファイルを log/compose に残す）")
+    parser.add_argument("--emit-candidates", metavar="DIR", default="",
+                        help="収集だけ行い、DIR に state.json / candidates.json を書いて終了する")
+    parser.add_argument("--compose", metavar="DIR", default="",
+                        help="DIR の candidates から selected.json / composed.json を作って終了する")
+    parser.add_argument("--post-from", metavar="DIR", default="",
+                        help="収集せず、DIR に書き出してある内容から配信する")
+    parser.add_argument("--llm-mode", choices=["api", "compose", "none"], default="api",
+                        help="要約・選定の担い手（api=従来どおり / compose=生成バックエンド / none=使わない）")
+    parser.add_argument("--compose-backend", metavar="NAME", default="",
+                        help="生成バックエンド名（既定は endpoints.yml の compose.default）")
+    parser.add_argument("--compose-model", metavar="MODEL", default="",
+                        help="生成に使うモデル（既定はバックエンドの default_model）")
+    parser.add_argument("--compose-timeout", type=int, default=COMPOSE_TIMEOUT_DEFAULT,
+                        metavar="SEC", help=f"生成の制限時間（秒）デフォルト: {COMPOSE_TIMEOUT_DEFAULT}")
+    parser.add_argument("--run-id", metavar="ID", default="",
+                        help="中間ファイルのディレクトリ名（既定は実行時刻 YYYYMMDD-HHMMSS）")
     args = parser.parse_args()
 
     # カスタムファイルパスが指定された場合は再読み込み
@@ -2220,6 +3162,13 @@ def main() -> None:
                   f"（定義済みグループ: {sorted(url_groups.keys())}）")
             ch["_skip_reason"] = "source_groups が解決できず categories も空（全記事配信になるため停止）"
 
+    # 3段分割はマルチチャンネルモード専用。黙って無視すると「収集したのに何も起きない」
+    # という分かりにくい失敗になるため、その場で止める。
+    if pipeline_mode_requested(args) and not multi_mode:
+        print("[ERROR] --pipeline / --emit-candidates / --compose / --post-from は"
+              "マルチチャンネルモード（channels.yml）でのみ使えます。")
+        sys.exit(EXIT_SETUP_ERROR)
+
     # シングルボットモードの事前チェック
     if not multi_mode and not WEBEX_BOT_TOKEN:
         print("[ERROR] WEBEX_BOT_TOKEN が設定されていません。.env を確認してください。")
@@ -2284,8 +3233,11 @@ def main() -> None:
             print(f"  [INFO] source_feeds から {added} 件のフィードを収集対象に追加（urls.yml 外）")
 
     # RSS 収集（1回だけ）/ Collect RSS once
+    # --post-from / --compose は書き出し済みの内容だけを扱うので収集しない。
+    # 以降の Phase 1〜2.5 は空のリストを処理して即座に抜ける（分岐を増やさない）。
     print("--- RSS 収集 ---")
-    all_entries = collect_all_entries(collect_urls, hours, args.fallback_items)
+    all_entries = ([] if (args.post_from or args.compose)
+                   else collect_all_entries(collect_urls, hours, args.fallback_items))
     print(f"\n  合計 {len(all_entries)} 件取得\n")
 
     # ===== マルチチャンネルモード =====
@@ -2485,6 +3437,36 @@ def main() -> None:
                     f"（日本語記事 {len(backfill)} 件を必須語ゲート迂回で補充）"
                 )
 
+        # ---- 収集 → 生成 → 投稿 の3段分割 / Collect → compose → post ----
+        # フラグを何も付けない実行ではここを素通りし、これまでと同じ経路で配信する。
+        simple_mode = False
+        if pipeline_mode_requested(args):
+            try:
+                outcome = run_pipeline_stage(
+                    args, now_jst, hours, active_channels, channel_filtered,
+                    [ch.get("name", "Unnamed") for ch in digest_channels],
+                )
+            except ComposeSetupError as exc:
+                print(f"[ERROR] {exc}")
+                sys.exit(EXIT_SETUP_ERROR)
+            except ComposeError as exc:
+                print(f"[ERROR] {exc}")
+                print("  生成結果を採用できないため、今回の投稿を見送ります（終了コード 3）")
+                sys.exit(EXIT_COMPOSE_REJECTED)
+            if outcome.all_entries is not None:
+                all_entries = outcome.all_entries
+            if outcome.selection is not None:
+                # 検証を通ったチャンネルだけを配信対象にする（載っていないチャンネルは
+                # 0件として扱う。pre_filtered が None になって再フィルタが走るのを防ぐ）。
+                channel_filtered = {
+                    ch.get("name", "Unnamed"): outcome.selection.get(ch.get("name", "Unnamed"), [])
+                    for ch in active_channels
+                }
+            simple_mode = outcome.simple_mode
+            if simple_mode:
+                morning_message = (f"{morning_message}\n\n" if morning_message else "") + SIMPLE_MODE_MARKER
+                print("  [INFO] 簡易モードのため、投稿の末尾に印を付けます")
+
         # デイリーダイジェスト用: 各チャンネルが実際に送った記事を集める入れ物。
         digest_collector: dict[str, list[dict]] = {}
 
@@ -2523,7 +3505,9 @@ def main() -> None:
                 hours_ago=hours,
                 now_jst=now_jst,
                 dry_run=args.dry_run,
-                anthropic_api_key=llm_api_key(),
+                # --llm-mode が api 以外なら、ここでは LLM を呼ばない
+                # （再ランクも要約も済んでいる、または使わないと決めている）。
+                anthropic_api_key=("" if args.llm_mode != "api" else llm_api_key()),
                 summarize_cache=summarize_cache,
                 anthropic_model=ANTHROPIC_MODEL,
                 morning_message=morning_message,
